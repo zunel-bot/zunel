@@ -177,7 +177,7 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     });
 
     let scheduler_task = match build_scheduler(&cfg, workspace.clone()).await {
-        Ok(scheduler) => Some(scheduler.spawn()),
+        Ok(scheduler) => Some(scheduler.with_message_bus(bus.clone()).spawn()),
         Err(err) => {
             tracing::warn!(error = %err, "gateway scheduler disabled");
             None

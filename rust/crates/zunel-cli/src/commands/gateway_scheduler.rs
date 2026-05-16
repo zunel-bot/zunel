@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use zunel_bus::{InboundMessage, MessageBus, MessageKind};
 use zunel_config::{Config, DreamConfig, HeartbeatConfig};
 use zunel_core::{DreamOutcome, DreamService, MemoryStore};
 use zunel_heartbeat::HeartbeatService;
@@ -81,6 +82,12 @@ pub struct GatewayScheduler {
     heartbeat_config: HeartbeatConfig,
     state: Arc<Mutex<SchedulerState>>,
     state_path: PathBuf,
+    /// Bus handle so heartbeat-derived tasks can be published as
+    /// synthetic InboundMessages and flow through the same gateway
+    /// pipeline that handles real Slack inbound. Set via
+    /// `with_message_bus`; when unset, heartbeat suggestions are
+    /// only logged (pre-v1.1 behaviour, preserved).
+    bus: Option<Arc<MessageBus>>,
 }
 
 impl GatewayScheduler {
@@ -99,7 +106,17 @@ impl GatewayScheduler {
             heartbeat_config: cfg.gateway.heartbeat.clone(),
             state: Arc::new(Mutex::new(state)),
             state_path,
+            bus: None,
         })
+    }
+
+    /// Attach a message bus so heartbeat-extracted tasks can be
+    /// dispatched as synthetic inbound messages. Without this, the
+    /// scheduler logs heartbeat decisions but does not act on them
+    /// (the historical v1.0 behaviour, preserved as a fallback).
+    pub fn with_message_bus(mut self, bus: Arc<MessageBus>) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     /// Spawn the scheduler loop on the current Tokio runtime. Returns
@@ -191,6 +208,7 @@ impl GatewayScheduler {
         match svc.trigger_now().await {
             Ok(Some(tasks)) => {
                 tracing::info!(?tasks, "scheduler: heartbeat suggested follow-up tasks");
+                self.dispatch_heartbeat_tasks(&tasks).await;
             }
             Ok(None) => {}
             Err(err) => tracing::warn!(error = %err, "scheduler: heartbeat trigger failed"),
@@ -199,6 +217,40 @@ impl GatewayScheduler {
         state.last_heartbeat_at = Some(now);
         save_state(&self.state_path, &state)?;
         Ok(())
+    }
+
+    /// Publish heartbeat-derived tasks back into the agent pipeline.
+    /// Uses a synthetic InboundMessage so the existing gateway loop
+    /// (approvals, session persistence, Slack rendering) handles
+    /// the turn the same way it handles a real Slack message.
+    ///
+    /// No-ops when (a) no bus is wired or (b) no
+    /// `heartbeat.target_channel` / `heartbeat.target_chat_id` are
+    /// configured. The tasks string still gets logged in either
+    /// case, so users adopting the feature can see what would have
+    /// been dispatched.
+    async fn dispatch_heartbeat_tasks(&self, tasks: &str) {
+        let (Some(bus), Some(channel), Some(chat_id)) = (
+            self.bus.as_ref(),
+            self.heartbeat_config.target_channel.as_ref(),
+            self.heartbeat_config.target_chat_id.as_ref(),
+        ) else {
+            tracing::info!(
+                "scheduler: heartbeat tasks not dispatched (target_channel/target_chat_id unset or bus missing)"
+            );
+            return;
+        };
+        let msg = InboundMessage {
+            channel: channel.clone(),
+            chat_id: chat_id.clone(),
+            user_id: Some("heartbeat".into()),
+            content: tasks.to_string(),
+            media: Vec::new(),
+            kind: MessageKind::Final,
+        };
+        if let Err(err) = bus.publish_inbound(msg).await {
+            tracing::warn!(error = %err, "scheduler: failed to publish heartbeat task to bus");
+        }
     }
 
     #[cfg(test)]
@@ -281,8 +333,104 @@ mod tests {
             enabled: true,
             interval_s: heartbeat_s,
             keep_recent_messages: 8,
+            target_channel: None,
+            target_chat_id: None,
         };
         cfg
+    }
+
+    /// Provider whose `.generate()` returns a heartbeat decision —
+    /// the "run: ..." prefix that `parse_decision` in the heartbeat
+    /// service strips and forwards.
+    struct DecisionProvider {
+        decision: String,
+    }
+
+    #[async_trait]
+    impl LLMProvider for DecisionProvider {
+        async fn generate(
+            &self,
+            _model: &str,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSchema],
+            _settings: &GenerationSettings,
+        ) -> zunel_providers::Result<LLMResponse> {
+            Ok(LLMResponse {
+                content: Some(self.decision.clone()),
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                finish_reason: None,
+            })
+        }
+
+        fn generate_stream<'a>(
+            &'a self,
+            _model: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [ToolSchema],
+            _settings: &'a GenerationSettings,
+        ) -> BoxStream<'a, zunel_providers::Result<StreamEvent>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_publishes_inbound_when_target_configured() {
+        // HEARTBEAT.md has to exist for the heartbeat service to do
+        // anything. Content is opaque to this test — the provider
+        // decides the heartbeat outcome via the canned response.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        std::fs::write(workspace.join("HEARTBEAT.md"), "- check the deploy\n").unwrap();
+
+        let mut cfg = cfg(0, 30); // dream disabled, heartbeat every 30s
+        cfg.gateway.heartbeat.target_channel = Some("slack".into());
+        cfg.gateway.heartbeat.target_chat_id = Some("D0OPSPAGE".into());
+
+        let provider: Arc<dyn LLMProvider> = Arc::new(DecisionProvider {
+            decision: "run: send a reminder about the deploy".into(),
+        });
+        let bus = Arc::new(MessageBus::new(8));
+        let scheduler = GatewayScheduler::from_config(&cfg, workspace, provider)
+            .unwrap()
+            .with_message_bus(bus.clone());
+
+        scheduler.tick_once(Utc::now()).await;
+        let received = bus.next_inbound().await.expect("inbound published");
+        assert_eq!(received.channel, "slack");
+        assert_eq!(received.chat_id, "D0OPSPAGE");
+        assert_eq!(received.user_id.as_deref(), Some("heartbeat"));
+        assert!(
+            received
+                .content
+                .contains("send a reminder about the deploy"),
+            "got: {}",
+            received.content
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_does_not_publish_without_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        std::fs::write(workspace.join("HEARTBEAT.md"), "- whatever\n").unwrap();
+
+        let cfg = cfg(0, 30); // target_channel/target_chat_id unset
+        let provider: Arc<dyn LLMProvider> = Arc::new(DecisionProvider {
+            decision: "run: do something".into(),
+        });
+        let bus = Arc::new(MessageBus::new(8));
+        let scheduler = GatewayScheduler::from_config(&cfg, workspace, provider)
+            .unwrap()
+            .with_message_bus(bus.clone());
+        scheduler.tick_once(Utc::now()).await;
+        // Bus must remain empty when there's no destination.
+        let drain =
+            tokio::time::timeout(std::time::Duration::from_millis(50), bus.next_inbound()).await;
+        assert!(
+            drain.is_err(),
+            "bus must stay empty when target is unset, got: {drain:?}"
+        );
     }
 
     #[tokio::test]

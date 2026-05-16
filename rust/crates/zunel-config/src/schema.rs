@@ -309,6 +309,17 @@ pub struct HeartbeatConfig {
     pub enabled: bool,
     pub interval_s: u64,
     pub keep_recent_messages: usize,
+    /// Channel a heartbeat-derived agent turn should publish to.
+    /// Matches the `channel` field on `InboundMessage` (e.g. `slack`).
+    /// When both `target_channel` and `target_chat_id` are set, the
+    /// scheduler publishes the extracted task as a synthetic inbound
+    /// message; the existing gateway pipeline picks it up like any
+    /// other turn (approvals, Slack render, all of it).
+    ///
+    /// When either is unset, heartbeat decisions are logged but no
+    /// agent turn is dispatched — preserving the pre-v1.1 behaviour.
+    pub target_channel: Option<String>,
+    pub target_chat_id: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -317,6 +328,8 @@ impl Default for HeartbeatConfig {
             enabled: true,
             interval_s: 30 * 60,
             keep_recent_messages: 8,
+            target_channel: None,
+            target_chat_id: None,
         }
     }
 }
