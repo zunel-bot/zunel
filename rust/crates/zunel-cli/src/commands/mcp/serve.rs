@@ -42,6 +42,26 @@ where
 }
 
 async fn handle_request(server: &str, request: Value) -> Value {
+    // For `--server self`, delegate to the canonical
+    // `zunel_mcp_self::handlers::handle_message` so the two surfaces
+    // can't drift. The Slack arm still uses the local list because
+    // `zunel-mcp-slack` keeps its tool table separate.
+    if server == "self" {
+        if let Some(resp) = zunel_mcp_self::handlers::handle_message(&request).await {
+            return resp;
+        }
+        // `handle_message` returns None for notifications (no `id`);
+        // the serve loop above only reaches us with framed requests
+        // that have an id, but stay defensive and synthesise an
+        // empty response just in case.
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": null
+        });
+    }
+
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     match method {
