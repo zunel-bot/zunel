@@ -206,6 +206,87 @@ fn tools_list() -> Value {
                 "description": "Report the most recent Dream consolidation pass: when it ran, how many history entries it processed, which files it edited, and whether the cursor advanced. Useful for answering 'did Dream run last night?' or debugging why MEMORY.md isn't updating.",
                 "inputSchema": {"type": "object", "properties": {}}
             },
+            {
+                "name": "zunel_config_get",
+                "description": "Read a single value from ~/.zunel/config.json by dot-path (e.g. `agents.defaults.model`). Returns the value as JSON, or null when the path is missing. Read-only; pair with `zunel_config_set` to mutate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "zunel_config_set",
+                "description": "Write a single value into ~/.zunel/config.json at the given dot-path. The whole tree is re-validated against the Config schema before the file is replaced atomically — a value that would break boot is rejected without disk side effects. Use for self-tuning (e.g. switching `agents.defaults.model`, adding `tools.mcpServers.<name>`, toggling `tools.approvalRequired`). Note: server-affecting changes take effect on the next process start unless paired with `mcp_reconnect` or `/reload`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "value": {}
+                    },
+                    "required": ["path", "value"]
+                }
+            },
+            {
+                "name": "zunel_skill_add",
+                "description": "Create a workspace skill at `<workspace>/skills/<name>/SKILL.md`. `content` should be the full SKILL.md body (YAML frontmatter + skill text). The skills loader picks up the new skill on the next agent turn; no reload needed. Rejects names containing path separators.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["name", "content"]
+                }
+            },
+            {
+                "name": "zunel_skill_remove",
+                "description": "Remove a workspace skill at `<workspace>/skills/<name>/`. Idempotent — missing skill is treated as success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "zunel_mcp_server_add",
+                "description": "Register a new MCP server under `tools.mcpServers.<name>` in ~/.zunel/config.json. `config` is the server entry (transport, command/args/url, optional env/headers). The agent should call `mcp_reconnect` after this so the new server's tools appear on the next turn.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "config": {"type": "object"}
+                    },
+                    "required": ["name", "config"]
+                }
+            },
+            {
+                "name": "zunel_mcp_server_remove",
+                "description": "Remove a server from `tools.mcpServers.<name>` in ~/.zunel/config.json. Atomic; idempotent. Pair with `mcp_reconnect` so the agent's tool registry drops the matching entries.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "zunel_heartbeat_task_add",
+                "description": "Append a task line to `<workspace>/HEARTBEAT.md`. The line is appended verbatim (with a leading dash if missing) so the heartbeat scheduler can pick it up on the next tick. Multi-line values are joined with spaces.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "zunel_heartbeat_task_remove",
+                "description": "Remove the first line of `<workspace>/HEARTBEAT.md` whose trimmed body equals `text`. Idempotent — no matching line is treated as success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]
+                }
+            },
             zunel_mcp_slack::capability_tool_descriptor()
         ]
     })
@@ -253,6 +334,18 @@ async fn call_tool(msg: &Value) -> Value {
             wrap(Ok(zunel_mcp_slack::capability_report()))
         }
         "zunel_dream_status" | "dream_status" => wrap(dream_status()),
+        "zunel_config_get" | "config_get" => wrap(config_get(&call_args(msg))),
+        "zunel_config_set" | "config_set" => wrap(config_set(&call_args(msg))),
+        "zunel_skill_add" | "skill_add" => wrap(skill_add(&call_args(msg))),
+        "zunel_skill_remove" | "skill_remove" => wrap(skill_remove(&call_args(msg))),
+        "zunel_mcp_server_add" | "mcp_server_add" => wrap(mcp_server_add(&call_args(msg))),
+        "zunel_mcp_server_remove" | "mcp_server_remove" => wrap(mcp_server_remove(&call_args(msg))),
+        "zunel_heartbeat_task_add" | "heartbeat_task_add" => {
+            wrap(heartbeat_task_add(&call_args(msg)))
+        }
+        "zunel_heartbeat_task_remove" | "heartbeat_task_remove" => {
+            wrap(heartbeat_task_remove(&call_args(msg)))
+        }
         "mcp_login_start" => {
             let args = call_args(msg);
             wrap(mcp_login_start(&args).await)
@@ -442,6 +535,318 @@ fn dream_status() -> Result<String> {
         "last_dream_at": last_at,
         "last_outcome": last_outcome
     }))?)
+}
+
+// ---------------------------------------------------------------------------
+// Self-modify surface: schema-validated tools that let the agent (or the user
+// via the agent) edit its own config, skills, MCP servers, and heartbeat
+// tasks. Every mutation is approval-gated by the calling agent's normal
+// tool-call dispatch — these handlers always honour the call.
+// ---------------------------------------------------------------------------
+
+/// Read a JSON value out of `~/.zunel/config.json` at the given
+/// dot-path. Returns `null` for a path that doesn't exist (rather
+/// than an error) so the agent can use this for existence checks
+/// without ceremony.
+fn config_get(args: &Value) -> Result<String> {
+    let path = required_str(args, "path")?;
+    let tree = zunel_config::load_config_json(None).context("loading config")?;
+    let value = walk_json_path(&tree, path).cloned().unwrap_or(Value::Null);
+    Ok(serde_json::to_string(&json!({
+        "path": path,
+        "value": value
+    }))?)
+}
+
+/// Write a JSON value into `~/.zunel/config.json` at the given
+/// dot-path. The whole tree is re-validated against the `Config`
+/// schema before the file is atomically replaced; a value that
+/// would break boot is rejected without disk side effects.
+fn config_set(args: &Value) -> Result<String> {
+    let path = required_str(args, "path")?;
+    let value = args
+        .get("value")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("missing required arg: value"))?;
+    let mut tree = zunel_config::load_config_json(None).context("loading config")?;
+    set_json_path(&mut tree, path, value.clone())
+        .map_err(|e| anyhow::anyhow!("set {path}: {e}"))?;
+    zunel_config::save_config_json(None, &tree).map_err(|e| anyhow::anyhow!("save config: {e}"))?;
+    Ok(serde_json::to_string(&json!({
+        "path": path,
+        "value": value,
+        "note": "config saved; some changes require process restart or mcp_reconnect"
+    }))?)
+}
+
+/// Add (or overwrite) a workspace skill at
+/// `<workspace>/skills/<name>/SKILL.md`. `name` must not contain
+/// `/`, `\\`, or `..` so a stray segment can't escape the skills
+/// dir. Existing skill dir + body is overwritten — callers that
+/// want create-only semantics should check with `read_file` first.
+fn skill_add(args: &Value) -> Result<String> {
+    let name = required_str(args, "name")?;
+    validate_skill_name(name)?;
+    let content = required_str(args, "content")?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let skill_dir = workspace.join("skills").join(name);
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("creating {}", skill_dir.display()))?;
+    let skill_path = skill_dir.join("SKILL.md");
+    std::fs::write(&skill_path, content)
+        .with_context(|| format!("writing {}", skill_path.display()))?;
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "path": skill_path.display().to_string(),
+        "bytes": content.len()
+    }))?)
+}
+
+/// Remove a workspace skill directory at
+/// `<workspace>/skills/<name>/`. Idempotent: a missing skill
+/// returns `removed: false` rather than an error so the agent can
+/// safely call this without first checking.
+fn skill_remove(args: &Value) -> Result<String> {
+    let name = required_str(args, "name")?;
+    validate_skill_name(name)?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let skill_dir = workspace.join("skills").join(name);
+    if !skill_dir.exists() {
+        return Ok(serde_json::to_string(&json!({
+            "status": "ok",
+            "removed": false,
+            "note": "skill did not exist"
+        }))?);
+    }
+    std::fs::remove_dir_all(&skill_dir)
+        .with_context(|| format!("removing {}", skill_dir.display()))?;
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "removed": true,
+        "path": skill_dir.display().to_string()
+    }))?)
+}
+
+/// Splice a new MCP server into `tools.mcpServers.<name>` in the
+/// raw JSON config (preserves unknown sibling fields and ordering).
+/// The whole tree round-trips through the `Config` schema before
+/// the write commits, so an invalid server config is rejected.
+fn mcp_server_add(args: &Value) -> Result<String> {
+    let name = required_str(args, "name")?;
+    let config = args
+        .get("config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("missing required arg: config"))?;
+    if !config.is_object() {
+        anyhow::bail!("config must be a JSON object");
+    }
+    let mut tree = zunel_config::load_config_json(None).context("loading config")?;
+    set_json_path(&mut tree, &format!("tools.mcpServers.{name}"), config)
+        .map_err(|e| anyhow::anyhow!("set tools.mcpServers.{name}: {e}"))?;
+    zunel_config::save_config_json(None, &tree).map_err(|e| anyhow::anyhow!("save config: {e}"))?;
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "name": name,
+        "note": "call mcp_reconnect to load the new server's tools"
+    }))?)
+}
+
+/// Remove `tools.mcpServers.<name>` from the config and persist.
+/// Idempotent.
+fn mcp_server_remove(args: &Value) -> Result<String> {
+    let name = required_str(args, "name")?;
+    let mut tree = zunel_config::load_config_json(None).context("loading config")?;
+    let removed = remove_json_path(&mut tree, &format!("tools.mcpServers.{name}"));
+    if !removed {
+        return Ok(serde_json::to_string(&json!({
+            "status": "ok",
+            "removed": false,
+            "note": "no such MCP server"
+        }))?);
+    }
+    zunel_config::save_config_json(None, &tree).map_err(|e| anyhow::anyhow!("save config: {e}"))?;
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "removed": true,
+        "name": name,
+        "note": "call mcp_reconnect so the agent drops the matching tools"
+    }))?)
+}
+
+/// Append a task line to `<workspace>/HEARTBEAT.md`. Multi-line
+/// input is joined with spaces so each task remains a single line
+/// (the heartbeat parser is line-oriented). A leading `- ` is
+/// added if missing so all entries follow the same list style.
+fn heartbeat_task_add(args: &Value) -> Result<String> {
+    let text = required_str(args, "text")?.trim().to_string();
+    if text.is_empty() {
+        anyhow::bail!("text must not be empty");
+    }
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let path = workspace.join("HEARTBEAT.md");
+    let line = if text.starts_with("- ") {
+        text
+    } else {
+        format!("- {text}")
+    };
+    let line = line.replace('\n', " ");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&line);
+    body.push('\n');
+    std::fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "path": path.display().to_string(),
+        "appended_line": line
+    }))?)
+}
+
+/// Remove the first line of `<workspace>/HEARTBEAT.md` whose
+/// trimmed (and leading-`-` stripped) body equals `text`.
+/// Idempotent — a non-matching call is reported as `removed: false`
+/// rather than an error.
+fn heartbeat_task_remove(args: &Value) -> Result<String> {
+    let needle = required_str(args, "text")?.trim().to_string();
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let path = workspace.join("HEARTBEAT.md");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok(serde_json::to_string(&json!({
+                "status": "ok",
+                "removed": false,
+                "note": "HEARTBEAT.md does not exist"
+            }))?)
+        }
+    };
+    let mut removed = false;
+    let mut out_lines: Vec<&str> = Vec::new();
+    for line in existing.lines() {
+        let stripped = line.trim_start();
+        let body = stripped.strip_prefix("- ").unwrap_or(stripped).trim();
+        if !removed && body == needle {
+            removed = true;
+            continue;
+        }
+        out_lines.push(line);
+    }
+    if !removed {
+        return Ok(serde_json::to_string(&json!({
+            "status": "ok",
+            "removed": false,
+            "note": "no matching line"
+        }))?);
+    }
+    let mut body = out_lines.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "removed": true,
+        "path": path.display().to_string()
+    }))?)
+}
+
+/// Walk a dot-path through a JSON tree; returns `None` if any
+/// segment is missing or the parent is not an object.
+fn walk_json_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = root;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        cur = cur.get(segment)?;
+    }
+    Some(cur)
+}
+
+/// Set a value at the given dot-path, creating intermediate
+/// objects as needed. Returns an error if a non-object value
+/// blocks the path.
+fn set_json_path(
+    root: &mut Value,
+    path: &str,
+    value: Value,
+) -> std::result::Result<(), &'static str> {
+    let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return Err("path must not be empty");
+    }
+    let mut cur = root;
+    for segment in &segments[..segments.len() - 1] {
+        if !cur.is_object() {
+            return Err("non-object value blocks path");
+        }
+        let obj = cur.as_object_mut().unwrap();
+        if !obj.contains_key(*segment) {
+            obj.insert(
+                (*segment).to_string(),
+                Value::Object(serde_json::Map::new()),
+            );
+        }
+        cur = obj.get_mut(*segment).unwrap();
+    }
+    if !cur.is_object() {
+        return Err("non-object value blocks final segment");
+    }
+    cur.as_object_mut()
+        .unwrap()
+        .insert(segments.last().unwrap().to_string(), value);
+    Ok(())
+}
+
+/// Remove a key at the given dot-path. Returns `true` when the
+/// key existed and was removed, `false` otherwise.
+fn remove_json_path(root: &mut Value, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return false;
+    }
+    let mut cur = root;
+    for segment in &segments[..segments.len() - 1] {
+        let Some(next) = cur.get_mut(*segment) else {
+            return false;
+        };
+        if !next.is_object() {
+            return false;
+        }
+        cur = next;
+    }
+    let Some(obj) = cur.as_object_mut() else {
+        return false;
+    };
+    obj.remove(*segments.last().unwrap()).is_some()
+}
+
+/// Reject skill names that could escape the skills directory or
+/// contain shell metacharacters. Allows letters, digits, `-`, `_`.
+fn validate_skill_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.starts_with('.')
+    {
+        anyhow::bail!("invalid skill name: {name}");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!("skill name must be [a-zA-Z0-9_-]: {name}");
+    }
+    Ok(())
 }
 
 fn mcp_servers_list() -> Result<String> {
@@ -1047,5 +1452,61 @@ mod handler_protocol_tests {
         // `.._etc_passwd.jsonl` inside `sessions/` — no traversal.
         assert_eq!(super::safe_session_key("../etc/passwd"), ".._etc_passwd");
         assert_eq!(super::safe_session_key("a*b?c"), "a_b_c");
+    }
+
+    #[test]
+    fn walk_and_set_json_path_round_trip() {
+        let mut tree = json!({"agents": {"defaults": {"model": "gpt-x"}}});
+        // Read existing.
+        assert_eq!(
+            super::walk_json_path(&tree, "agents.defaults.model"),
+            Some(&json!("gpt-x"))
+        );
+        // Read missing — must be None, not a panic.
+        assert_eq!(super::walk_json_path(&tree, "missing"), None);
+        // Set overwrites.
+        super::set_json_path(&mut tree, "agents.defaults.model", json!("gpt-5")).unwrap();
+        assert_eq!(
+            super::walk_json_path(&tree, "agents.defaults.model"),
+            Some(&json!("gpt-5"))
+        );
+        // Set creates intermediate objects.
+        super::set_json_path(
+            &mut tree,
+            "tools.mcpServers.linear",
+            json!({"type": "stdio"}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::walk_json_path(&tree, "tools.mcpServers.linear.type"),
+            Some(&json!("stdio"))
+        );
+    }
+
+    #[test]
+    fn remove_json_path_handles_present_and_missing() {
+        let mut tree = json!({"tools": {"mcpServers": {"foo": {"x": 1}, "bar": {"y": 2}}}});
+        assert!(super::remove_json_path(&mut tree, "tools.mcpServers.foo"));
+        assert!(tree.pointer("/tools/mcpServers/foo").is_none());
+        assert!(tree.pointer("/tools/mcpServers/bar").is_some());
+        // Missing key returns false, doesn't mutate.
+        assert!(!super::remove_json_path(&mut tree, "tools.mcpServers.foo"));
+        // Non-existent parent path returns false.
+        assert!(!super::remove_json_path(&mut tree, "nope.nada"));
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_traversal_and_metacharacters() {
+        assert!(super::validate_skill_name("ok-name").is_ok());
+        assert!(super::validate_skill_name("ok_name_123").is_ok());
+        assert!(super::validate_skill_name("").is_err());
+        assert!(super::validate_skill_name(".").is_err());
+        assert!(super::validate_skill_name("..").is_err());
+        assert!(super::validate_skill_name(".hidden").is_err());
+        assert!(super::validate_skill_name("a/b").is_err());
+        assert!(super::validate_skill_name("a\\b").is_err());
+        assert!(super::validate_skill_name("a b").is_err());
+        assert!(super::validate_skill_name("a.b").is_err());
+        assert!(super::validate_skill_name("a*b").is_err());
     }
 }

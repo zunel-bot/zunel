@@ -592,3 +592,198 @@ async fn native_self_mcp_server_chat_oauth_login_complete_rejects_state_mismatch
     // user can retry the same authorize URL.
     assert!(home.path().join("mcp-oauth/remote/pending.json").exists());
 }
+
+/// End-to-end smoke for the self-modify config surface (Round 4):
+/// `zunel_config_set` must atomically update ~/.zunel/config.json
+/// and `zunel_config_get` must read the freshly-written value back.
+/// Schema validation prevents writes that would break boot.
+#[tokio::test]
+async fn native_self_mcp_server_config_get_and_set_round_trip() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        home.path().join("config.json"),
+        format!(
+            r#"{{
+                "providers": {{}},
+                "agents": {{"defaults": {{"model": "m", "workspace": "{}"}}}}
+            }}"#,
+            workspace.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let bin = cargo_bin("zunel-mcp-self");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "ZUNEL_HOME".to_string(),
+        home.path().to_string_lossy().to_string(),
+    );
+    let mut client = StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &[], env, &[], 5)
+        .await
+        .unwrap();
+
+    // Read the seeded model.
+    let result = client
+        .call_tool(
+            "zunel_config_get",
+            serde_json::json!({"path": "agents.defaults.model"}),
+            5,
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["value"], "m", "{result}");
+
+    // Write a new value.
+    let result = client
+        .call_tool(
+            "zunel_config_set",
+            serde_json::json!({
+                "path": "agents.defaults.model",
+                "value": "gpt-5"
+            }),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("\"status\":\"ok\"") || result.contains("\"value\":\"gpt-5\""));
+
+    // Read it back.
+    let result = client
+        .call_tool(
+            "zunel_config_get",
+            serde_json::json!({"path": "agents.defaults.model"}),
+            5,
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["value"], "gpt-5", "{result}");
+
+    // Verify on-disk file actually changed (atomic write
+    // semantics — no tempfile left behind).
+    let raw = fs::read_to_string(home.path().join("config.json")).unwrap();
+    assert!(raw.contains("gpt-5"), "on-disk config: {raw}");
+    assert!(!home.path().join("config.json.tmp").exists());
+}
+
+/// Schema-violation rejection: writing a value that doesn't fit
+/// `Config` must leave the file untouched.
+#[tokio::test]
+async fn native_self_mcp_server_config_set_rejects_invalid_value() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let original = format!(
+        r#"{{
+            "providers": {{}},
+            "agents": {{"defaults": {{"model": "m", "workspace": "{}"}}}}
+        }}"#,
+        workspace.display().to_string().replace('\\', "/")
+    );
+    fs::write(home.path().join("config.json"), &original).unwrap();
+
+    let bin = cargo_bin("zunel-mcp-self");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "ZUNEL_HOME".to_string(),
+        home.path().to_string_lossy().to_string(),
+    );
+    let mut client = StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &[], env, &[], 5)
+        .await
+        .unwrap();
+
+    // `agents.defaults.model` is a String — feed it an object so the
+    // round-trip through `Config` deserialisation fails.
+    let result = client
+        .call_tool(
+            "zunel_config_set",
+            serde_json::json!({
+                "path": "agents.defaults.model",
+                "value": {"not": "a string"}
+            }),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("isError") || result.contains("error") || result.contains("expected"),
+        "expected schema rejection, got: {result}"
+    );
+
+    // File must be untouched.
+    let after = fs::read_to_string(home.path().join("config.json")).unwrap();
+    assert_eq!(after, original);
+}
+
+/// Skill add → read back → remove. Verifies the workspace path is
+/// the destination and that names are validated against traversal.
+#[tokio::test]
+async fn native_self_mcp_server_skill_add_remove_round_trip() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        home.path().join("config.json"),
+        format!(
+            r#"{{
+                "providers": {{}},
+                "agents": {{"defaults": {{"model": "m", "workspace": "{}"}}}}
+            }}"#,
+            workspace.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let bin = cargo_bin("zunel-mcp-self");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "ZUNEL_HOME".to_string(),
+        home.path().to_string_lossy().to_string(),
+    );
+    let mut client = StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &[], env, &[], 5)
+        .await
+        .unwrap();
+
+    let result = client
+        .call_tool(
+            "zunel_skill_add",
+            serde_json::json!({
+                "name": "test-skill",
+                "content": "---\nname: test-skill\n---\nbody"
+            }),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("\"status\":\"ok\""), "{result}");
+    let skill_path = workspace.join("skills/test-skill/SKILL.md");
+    assert!(skill_path.exists(), "skill file should exist");
+
+    // Traversal must be rejected.
+    let result = client
+        .call_tool(
+            "zunel_skill_add",
+            serde_json::json!({"name": "../evil", "content": "x"}),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("invalid skill name") || result.contains("isError"),
+        "expected traversal rejection: {result}"
+    );
+
+    // Remove → file gone.
+    let _ = client
+        .call_tool(
+            "zunel_skill_remove",
+            serde_json::json!({"name": "test-skill"}),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(!skill_path.exists(), "skill file should be removed");
+}
