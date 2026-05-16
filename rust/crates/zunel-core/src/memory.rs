@@ -187,6 +187,41 @@ impl DreamService {
     }
 
     pub async fn run(&self) -> Result<DreamOutcome> {
+        // Cross-process advisory lock on `<ws>/memory/.dream_lock` so
+        // the gateway scheduler tick, `/dream` from the CLI REPL, and
+        // a `zunel_dream_run` tool call cannot all execute against
+        // the same `.dream_cursor` concurrently. A second concurrent
+        // pass returns Ok(noop) immediately rather than blocking —
+        // there's nothing useful for it to do anyway, the first pass
+        // will consume the batch.
+        let lock_dir = self.store.workspace.join("memory");
+        std::fs::create_dir_all(&lock_dir).map_err(|source| Error::Session {
+            path: lock_dir.clone(),
+            source: Box::new(source),
+        })?;
+        let lock_path = lock_dir.join(".dream_lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| Error::Session {
+                path: lock_path.clone(),
+                source: Box::new(source),
+            })?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = match lock.try_write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::info!(
+                    workspace = %self.store.workspace.display(),
+                    "dream: another pass is in flight; skipping this tick",
+                );
+                return Ok(DreamOutcome::default());
+            }
+        };
+
         let cursor = DreamCursor::new(self.store.workspace.clone());
         let last_cursor = cursor.read()?;
         let entries = self.store.read_unprocessed_history(last_cursor)?;
@@ -209,11 +244,25 @@ impl DreamService {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // Cap each file at 32 KB so a year-old MEMORY.md doesn't make
+        // every Dream pass pay a ballooning token cost. The phase 2
+        // edit runner still has unrestricted read access via the
+        // read_file tool if it needs the full body.
+        const PHASE1_FILE_CAP_BYTES: usize = 32 * 1024;
+        let cap = |s: String| -> String {
+            let (slice, truncated) =
+                zunel_util::truncate_at_char_boundary(s.trim(), PHASE1_FILE_CAP_BYTES);
+            if truncated {
+                format!("{slice}\n\n…(truncated; use read_file for the full body)")
+            } else {
+                slice.to_string()
+            }
+        };
         let file_context = format!(
             "## Current MEMORY.md\n{}\n\n## Current SOUL.md\n{}\n\n## Current USER.md\n{}",
-            empty_marker(self.store.read_memory()?),
-            empty_marker(self.store.read_soul()?),
-            empty_marker(self.store.read_user()?),
+            empty_marker(cap(self.store.read_memory()?)),
+            empty_marker(cap(self.store.read_soul()?)),
+            empty_marker(cap(self.store.read_user()?)),
         );
         let phase1 = self
             .provider
@@ -460,10 +509,25 @@ impl MemoryStore {
             path: path.clone(),
             source: Box::new(source),
         })?;
-        Ok(raw
-            .lines()
-            .filter_map(|line| serde_json::from_str::<HistoryEntry>(line).ok())
-            .collect())
+        let mut entries = Vec::new();
+        let mut dropped = 0usize;
+        for line in raw.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<HistoryEntry>(line) {
+                Ok(entry) => entries.push(entry),
+                Err(_) => dropped += 1,
+            }
+        }
+        if dropped > 0 {
+            tracing::warn!(
+                path = %path.display(),
+                dropped,
+                "memory: skipped malformed history.jsonl lines",
+            );
+        }
+        Ok(entries)
     }
 
     fn memory_path(&self) -> PathBuf {

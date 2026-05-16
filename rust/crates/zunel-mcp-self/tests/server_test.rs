@@ -20,7 +20,15 @@ async fn native_self_mcp_server_lists_and_calls_status_tool() {
         .call_tool("self_status", serde_json::json!({}), 5)
         .await
         .unwrap();
-    assert!(result.contains("zunel-self ok"), "{result}");
+    // `self_status` was upgraded to return a structured JSON payload
+    // (was the literal "zunel-self ok" string) — assert on the
+    // well-known top-level keys so the test remains resilient to
+    // additions but catches accidental shape regressions.
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect(&result);
+    assert_eq!(parsed["server"], "zunel-mcp-self", "{result}");
+    assert!(parsed.get("version").is_some(), "{result}");
+    assert!(parsed.get("model").is_some(), "{result}");
+    assert!(parsed.get("workspace").is_some(), "{result}");
 }
 
 #[tokio::test]

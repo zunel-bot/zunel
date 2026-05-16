@@ -218,9 +218,7 @@ async fn call_tool(msg: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or_default();
     match name {
-        "self_status" => {
-            json!({"content": [{"type": "text", "text": "zunel-self ok"}]})
-        }
+        "self_status" => wrap(self_status()),
         "zunel_sessions_list" | "sessions_list" => {
             let args = call_args(msg);
             wrap(sessions_list(&args))
@@ -368,6 +366,48 @@ fn channels_list() -> Result<String> {
     Ok(serde_json::to_string(&json!({
         "count": channels.len(),
         "channels": channels
+    }))?)
+}
+
+/// Structured replacement for the historical "zunel-self ok" string.
+/// Returns a single JSON object the agent can reason over directly:
+/// `{ server, version, model, provider, workspace, last_dream_at,
+/// last_heartbeat_at, mcp_servers, channels, sessions_dir_exists }`.
+/// Cheaper than calling four separate self tools just to figure out
+/// "is this thing healthy".
+fn self_status() -> Result<String> {
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let scheduler_path = workspace.join(".zunel").join("scheduler.json");
+    let (last_dream_at, last_heartbeat_at) = if scheduler_path.exists() {
+        match std::fs::read_to_string(&scheduler_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            Some(state) => (
+                state.get("last_dream_at").cloned().unwrap_or(Value::Null),
+                state
+                    .get("last_dream_outcome")
+                    .and_then(|o| o.get("at"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            ),
+            None => (Value::Null, Value::Null),
+        }
+    } else {
+        (Value::Null, Value::Null)
+    };
+    Ok(serde_json::to_string(&json!({
+        "server": SERVER_NAME,
+        "version": env!("CARGO_PKG_VERSION"),
+        "model": cfg.agents.defaults.model,
+        "provider": cfg.agents.defaults.provider,
+        "workspace": workspace.display().to_string(),
+        "mcp_servers": cfg.tools.mcp_servers.len(),
+        "channels_enabled": cfg.channels.slack.as_ref().map(|s| s.enabled).unwrap_or(false),
+        "sessions_dir_exists": workspace.join("sessions").exists(),
+        "last_dream_at": last_dream_at,
+        "last_heartbeat_at": last_heartbeat_at
     }))?)
 }
 
@@ -890,6 +930,16 @@ fn session_path(workspace: &Path, key: &str) -> Option<std::path::PathBuf> {
     path.exists().then_some(path)
 }
 
+/// Sanitise a session key into a filesystem-safe slug.
+///
+/// MUST stay in sync with `SessionManager::safe_key` in `zunel-core`,
+/// which is the canonical writer side — if the two diverge, sessions
+/// written by the agent loop become invisible to this MCP server.
+/// The set of unsafe chars (`<>:"/\|?*`) is the Windows-reserved
+/// filename set; every other Unicode codepoint passes through, so
+/// non-ASCII session keys (`émoji🎉`) round-trip cleanly. Path
+/// traversal via `..` is harmless here: `/` is filtered, so `..` can
+/// only appear in the final basename, not as a directory traversal.
 fn safe_session_key(key: &str) -> String {
     const UNSAFE: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     key.chars()
@@ -969,5 +1019,33 @@ mod handler_protocol_tests {
         assert_eq!(resp["id"], json!(1));
         assert!(resp.get("result").is_some(), "{resp}");
         assert!(resp.get("error").is_none(), "{resp}");
+    }
+
+    #[test]
+    fn safe_session_key_matches_canonical_session_manager_mapping() {
+        // Must mirror `SessionManager::safe_key` in zunel-core, since
+        // sessions written there end up at
+        // `sessions/<safe_key>.jsonl` and this MCP server has to
+        // resolve the same path back from a chat-supplied key.
+        assert_eq!(super::safe_session_key("slack:DTEST"), "slack_DTEST");
+        assert_eq!(super::safe_session_key("cli:direct"), "cli_direct");
+        assert_eq!(super::safe_session_key("agent:foo:bar"), "agent_foo_bar");
+        // Non-ASCII passes through unchanged (matches canonical behaviour).
+        assert_eq!(super::safe_session_key("émoji🎉"), "émoji🎉");
+        // Trailing whitespace is trimmed.
+        assert_eq!(super::safe_session_key("  padded  "), "padded");
+    }
+
+    #[test]
+    fn safe_session_key_neutralises_separators_and_metacharacters() {
+        // Path separators and shell metacharacters become `_` so a
+        // chat-supplied session key can't escape `sessions/`.
+        assert_eq!(super::safe_session_key("a/b"), "a_b");
+        assert_eq!(super::safe_session_key("a\\b"), "a_b");
+        // `..` is harmless on its own because `/` is already filtered,
+        // so `../etc/passwd` collapses to a file literally named
+        // `.._etc_passwd.jsonl` inside `sessions/` — no traversal.
+        assert_eq!(super::safe_session_key("../etc/passwd"), ".._etc_passwd");
+        assert_eq!(super::safe_session_key("a*b?c"), "a_b_c");
     }
 }

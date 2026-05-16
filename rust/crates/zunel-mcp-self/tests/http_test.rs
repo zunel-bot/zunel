@@ -138,7 +138,7 @@ async fn http_transport_lists_tools_and_calls_self_status_via_sse() {
         .call_tool("self_status", json!({}), 5)
         .await
         .expect("call self_status");
-    assert!(status.contains("zunel-self ok"), "{status}");
+    assert!(status.contains("\"server\":\"zunel-mcp-self\""), "{status}");
 }
 
 #[tokio::test]
@@ -327,7 +327,7 @@ async fn http_transport_accepts_bearer_token_via_remote_client() {
         .call_tool("self_status", json!({}), 5)
         .await
         .expect("authenticated call");
-    assert!(status.contains("zunel-self ok"), "{status}");
+    assert!(status.contains("\"server\":\"zunel-mcp-self\""), "{status}");
 }
 
 #[tokio::test]
@@ -444,7 +444,10 @@ async fn http_transport_accepts_any_token_in_rotation_overlap() {
             .call_tool("self_status", json!({}), 5)
             .await
             .unwrap_or_else(|err| panic!("self_status with {token}: {err:#}"));
-        assert!(status.contains("zunel-self ok"), "{token}: {status}");
+        assert!(
+            status.contains("\"server\":\"zunel-mcp-self\""),
+            "{token}: {status}"
+        );
     }
 
     // A token that was never on the allowlist still gets 401.
@@ -717,7 +720,7 @@ async fn http_transport_emits_one_json_line_per_request_with_redacted_key() {
         .call_tool("self_status", json!({}), 5)
         .await
         .expect("call self_status");
-    assert!(status.contains("zunel-self ok"), "{status}");
+    assert!(status.contains("\"server\":\"zunel-mcp-self\""), "{status}");
 
     // Unauthenticated probe → 401 without leaking key fingerprint.
     let response = reqwest::Client::new()
