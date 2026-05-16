@@ -1,0 +1,20 @@
+[package]
+name = "zunel-util"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dirs.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+http = "1"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

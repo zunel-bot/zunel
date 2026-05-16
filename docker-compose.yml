@@ -1,0 +1,51 @@
+x-common-config: &common-config
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: zunel
+  volumes:
+    - ~/.zunel:/home/zunel/.zunel
+  # zunel's `exec` tool runs untrusted commands inside `bubblewrap`, which
+  # creates user / mount / pid namespaces via `unshare(CLONE_NEW*)`. Docker's
+  # default seccomp + AppArmor profiles block those syscalls and Docker's
+  # default `--cap-drop ALL` strips CAP_SYS_ADMIN, so without the relaxations
+  # below the agent silently degrades to ``exec`` failures inside the
+  # container.
+  #
+  # Trade-off: the container is *less* isolated from the host kernel than a
+  # default Docker container. The agent process still runs unprivileged
+  # (UID 1000) and bubblewrap re-imposes its own sandbox on every `exec`
+  # call, so the practical isolation against agent-controlled commands is
+  # comparable to running zunel on the host directly. See
+  # `docs/deployment.md` for a longer write-up.
+  cap_drop:
+    - ALL
+  cap_add:
+    - SYS_ADMIN
+  security_opt:
+    - apparmor=unconfined
+    - seccomp=unconfined
+
+services:
+  zunel-gateway:
+    container_name: zunel-gateway
+    <<: *common-config
+    command: ["gateway"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  zunel-cli:
+    container_name: zunel-cli
+    <<: *common-config
+    profiles:
+      - cli
+    command: ["status"]
+    stdin_open: true
+    tty: true

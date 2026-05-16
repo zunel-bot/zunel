@@ -1,0 +1,57 @@
+[package]
+name = "zunel-mcp-self"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Built-in self-inspection MCP server for Zunel."
+homepage = "https://github.com/zunel-bot/homebrew-tap"
+
+[lib]
+name = "zunel_mcp_self"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zunel-mcp-self"
+path = "src/main.rs"
+
+# Internal binary used only by integration tests
+# (`assert_cmd::cargo::cargo_bin("zunel-mcp-self")`); the runtime
+# dispatches to this MCP server in-process via `zunel mcp serve
+# --server self`, so users never invoke this executable directly.
+# Opt out of cargo-dist so the release pipeline only ships `zunel`.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+reqwest.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio-util.workspace = true
+tracing.workspace = true
+zunel-config.workspace = true
+zunel-mcp.workspace = true
+zunel-mcp-slack.workspace = true
+zunel-tools.workspace = true
+
+[features]
+default = []
+# Enables small lib-level test scaffolding (MapDispatcher) so dependent
+# crates can drive the HTTP server in their own integration tests
+# without copy/pasting boilerplate.
+test-support = []
+
+[dev-dependencies]
+assert_cmd.workspace = true
+rcgen = "0.13"
+tempfile.workspace = true
+wiremock.workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "zunel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Library facade for zunel."
+
+[dependencies]
+zunel-config.workspace = true
+zunel-core.workspace = true
+zunel-providers.workspace = true
+zunel-skills.workspace = true
+zunel-tools.workspace = true
+zunel-util.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }

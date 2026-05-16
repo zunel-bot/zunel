@@ -1,0 +1,30 @@
+[package]
+name = "zunel-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+zunel-config.workspace = true
+zunel-tools.workspace = true
+zunel-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true

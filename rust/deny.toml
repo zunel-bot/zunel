@@ -1,0 +1,81 @@
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-musl" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # rustls-pemfile is unmaintained as of Aug 2025. The advisory itself
+    # notes "no safe upgrade is available" — the recommended migration is
+    # to `rustls-pki-types::PemObject`, which is a code-level refactor
+    # tracked separately. Pulled in transitively via `reqwest -> rustls`,
+    # so we can't drop it until upstream rustls cuts a release using the
+    # new API. No CVE attached; this is a maintenance signal, not a
+    # security issue.
+    "RUSTSEC-2025-0134",
+
+    # webpki <0.22.7 name-constraint validation bugs. Reachable only via
+    # the AWS SDK's transitive `aws-smithy-http-client -> hyper-rustls
+    # 0.24.2 -> webpki 0.22.x`. zunel itself uses the modern
+    # `rustls-webpki` directly (via `rustls`), which is unaffected.
+    # The vulnerable webpki path is only used to verify AWS service
+    # endpoint cert chains (sso/sts/bedrock/ssooidc), where the
+    # practical impact of a name-constraint bypass is effectively zero.
+    # Will drop once aws-smithy-http-client publishes a release built
+    # against a newer hyper-rustls.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+
+    # rustls-webpki <0.103.13 reachable panic in CRL parsing
+    # (`BorrowedCertRevocationList::from_der` /
+    # `OwnedCertRevocationList::from_der` mishandle a syntactically valid
+    # empty `BIT STRING` in `IssuingDistributionPoint.onlySomeReasons`).
+    # The advisory itself notes "Applications that do not use CRLs are
+    # not affected." zunel does not load or verify CRLs anywhere; the
+    # only path into vulnerable rustls-webpki 0.101.7 is via
+    # `aws-smithy-http-client -> rustls 0.21.12`, which we use only to
+    # talk to AWS service endpoints (sso/sts/bedrock/ssooidc) — those
+    # responses do not deliver attacker-controlled CRLs. Drop once
+    # aws-smithy-http-client picks up a newer rustls.
+    "RUSTSEC-2026-0104",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Zlib",
+    "MPL-2.0",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+allow = []
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,15 @@
+[package]
+name = "zunel-tokens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tiktoken-rs.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

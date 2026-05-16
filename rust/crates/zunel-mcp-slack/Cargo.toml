@@ -1,0 +1,38 @@
+[package]
+name = "zunel-mcp-slack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Built-in read-only Slack MCP server for Zunel."
+homepage = "https://github.com/zunel-bot/homebrew-tap"
+
+[lib]
+name = "zunel_mcp_slack"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zunel-mcp-slack"
+path = "src/main.rs"
+
+# Internal binary used only by integration tests
+# (`assert_cmd::cargo::cargo_bin("zunel-mcp-slack")`); the runtime
+# dispatches to this MCP server in-process via `zunel mcp serve
+# --server slack`, so users never invoke this executable directly.
+# Opt out of cargo-dist so the release pipeline only ships `zunel`.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+anyhow.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
+zunel-config.workspace = true
+zunel-mcp.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true

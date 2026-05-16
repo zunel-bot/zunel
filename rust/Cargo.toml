@@ -1,0 +1,170 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zunel-config",
+    "crates/zunel-bus",
+    "crates/zunel-util",
+    "crates/zunel-providers",
+    "crates/zunel-tokens",
+    "crates/zunel-skills",
+    "crates/zunel-context",
+    "crates/zunel-tools",
+    "crates/zunel-mcp",
+    "crates/zunel-channels",
+    "crates/zunel-aws",
+    "crates/zunel-cron",
+    "crates/zunel-heartbeat",
+    "crates/zunel-mcp-slack",
+    "crates/zunel-mcp-self",
+    "crates/zunel-core",
+    "crates/zunel-cli",
+    "crates/zunel",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/zunel-bot/homebrew-tap"
+homepage = "https://github.com/zunel-bot/homebrew-tap"
+description = "Personal AI assistant with a local chat REPL, Slack gateway, and built-in MCP servers."
+authors = ["zunel contributors"]
+
+[workspace.dependencies]
+# Async runtime + logging
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Streams
+futures = "0.3"
+async-stream = "0.3"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+reedline = "0.37"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+base64 = "0.22"
+
+# Paths / env
+dirs = "6"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Test deps
+wiremock = "0.6"
+insta = { version = "1", features = ["json"] }
+assert_cmd = "2"
+tempfile = "3"
+serial_test = "3"
+proptest = "1.5"
+
+# Internal crate paths. Versions are pinned to the workspace version so
+# cargo-deny does not flag them as wildcard deps on publishable crates.
+zunel-config = { path = "crates/zunel-config", version = "=1.0.0" }
+zunel-bus = { path = "crates/zunel-bus", version = "=1.0.0" }
+zunel-util = { path = "crates/zunel-util", version = "=1.0.0" }
+zunel-providers = { path = "crates/zunel-providers", version = "=1.0.0" }
+zunel-tokens = { path = "crates/zunel-tokens", version = "=1.0.0" }
+zunel-skills = { path = "crates/zunel-skills", version = "=1.0.0" }
+zunel-context = { path = "crates/zunel-context", version = "=1.0.0" }
+zunel-tools = { path = "crates/zunel-tools", version = "=1.0.0" }
+zunel-mcp = { path = "crates/zunel-mcp", version = "=1.0.0" }
+zunel-mcp-self = { path = "crates/zunel-mcp-self", version = "=1.0.0" }
+zunel-mcp-slack = { path = "crates/zunel-mcp-slack", version = "=1.0.0" }
+zunel-channels = { path = "crates/zunel-channels", version = "=1.0.0" }
+zunel-aws = { path = "crates/zunel-aws", version = "=1.0.0" }
+zunel-cron = { path = "crates/zunel-cron", version = "=1.0.0" }
+zunel-heartbeat = { path = "crates/zunel-heartbeat", version = "=1.0.0" }
+zunel-core = { path = "crates/zunel-core", version = "=1.0.0" }
+
+# Token counting
+tiktoken-rs = "0.7"
+
+# Skills / context
+serde_yaml = "0.9"
+walkdir = "2"
+which = "6"
+minijinja = "2"
+include_dir = "0.7"
+
+# Tools
+async-trait = "0.1"
+globset = "0.4"
+htmd = "0.5"
+ignore = "0.4"
+regex = "1"
+sha2 = "0.10"
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"
+
+# Crypto
+getrandom = "0.3"
+
+# Cross-process file locking for session writes
+fd-lock = "4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
+# Which actions to run on pull requests
+pr-run-mode = "plan"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+# cargo-dist generates workflows assuming `dist` runs from the repository
+# root, but this repository keeps the Cargo workspace under `rust/`. The
+# generated `release.yml` is hand-patched to (a) `working-directory: rust`
+# every `dist <subcmd>` step and (b) prefix uploaded paths with `rust/`. To
+# regenerate after editing `[workspace.metadata.dist]` (e.g. adding a new
+# installer or platform), temporarily drop `allow-dirty = ["ci"]`, run
+# `(cd rust && dist generate --mode=ci)`, restore `allow-dirty`, and
+# re-apply the workspace-in-subdir patches via `git diff` against the
+# previous release.yml.
+allow-dirty = ["ci"]
+# Personal Homebrew tap to publish the auto-generated formula into. The tap
+# repo doubles as the public binary host: every release's per-target tarballs
+# (and `.deb`s from `deb.yml`) are uploaded to a GitHub Release on the same
+# `zunel-bot/homebrew-tap` repo, and the formula's download URLs reference
+# that release (because cargo-dist derives them from
+# `[workspace.package].repository` above, which we point at the tap repo).
+# Users get `brew tap zunel-bot/tap && brew install zunel` and `dpkg -i`
+# against a single public repo. Requires a `HOMEBREW_TAP_TOKEN` GitHub
+# Actions secret on the source repo: a fine-grained PAT with
+# `contents:write` on the tap repo (used by both the formula bump and the
+# release-asset mirror in `.github/workflows/release.yml` + `deb.yml`).
+tap = "zunel-bot/homebrew-tap"
+publish-jobs = ["homebrew"]

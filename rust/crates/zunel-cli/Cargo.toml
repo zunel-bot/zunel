@@ -1,0 +1,107 @@
+[package]
+name = "zunel-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI and Slack gateway for the Zunel personal AI assistant."
+homepage = "https://github.com/zunel-bot/homebrew-tap"
+
+[[bin]]
+name = "zunel"
+path = "src/main.rs"
+
+# Override cargo-dist's default formula naming so the auto-generated
+# Homebrew formula lands as `Formula/zunel.rb` (matching the binary
+# name) rather than `Formula/zunel-cli.rb` (matching the crate name).
+# Users see `brew install zunel`, not `brew install zunel-cli`.
+[package.metadata.dist]
+formula = "zunel"
+
+# `cargo deb` consumes this section to build a Debian package whose
+# binary name (`zunel`) is the executable produced by this crate. The
+# release workflow at `.github/workflows/deb.yml` runs
+# `cargo deb --no-build --no-strip --target <triple>` against the
+# pre-built statically-linked musl binary cargo-dist already published
+# to the GitHub Release, then attaches the resulting `.deb`s to the
+# same release. `depends = "$auto"` reduces to (effectively) nothing
+# because the binary is statically linked against musl + rustls.
+#
+# Asset paths are relative to this `Cargo.toml`'s directory. cargo-deb
+# auto-rewrites `target/release/<bin>` → `target/<triple>/release/<bin>`
+# when `--target <triple>` is passed. Providing an explicit `assets =`
+# list overrides cargo-deb's auto-included binary, so we re-list it
+# here alongside the documentation assets.
+[package.metadata.deb]
+name = "zunel"
+maintainer = "Zunel Bot <zunel-bot@users.noreply.github.com>"
+copyright = "2026, Zunel Bot <zunel-bot@users.noreply.github.com>"
+license-file = ["../../../LICENSE", "0"]
+extended-description = """\
+Zunel is a single-binary personal AI assistant: a local chat REPL
+(`zunel agent`), a Slack gateway (`zunel gateway`), and a set of
+built-in MCP servers (`zunel mcp serve --server self|slack`). State
+lives under `~/.zunel/` and is created on first run via
+`zunel onboard`. The Codex provider depends on a separately-installed
+`codex` CLI; the OpenAI-compatible and Bedrock providers have no
+additional install steps.\
+"""
+depends = "$auto"
+recommends = "ca-certificates"
+section = "utility"
+priority = "optional"
+assets = [
+    ["../../target/release/zunel", "usr/bin/", "755"],
+    ["../../../README.md", "usr/share/doc/zunel/README", "644"],
+    ["../../../LICENSE", "usr/share/doc/zunel/copyright", "644"],
+    ["../../../docs/cli-reference.md", "usr/share/doc/zunel/cli-reference.md", "644"],
+    ["../../../docs/configuration.md", "usr/share/doc/zunel/configuration.md", "644"],
+    ["../../../docs/quick-start.md", "usr/share/doc/zunel/quick-start.md", "644"],
+]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+rcgen = "0.13"
+reedline.workspace = true
+reqwest.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zunel-aws.workspace = true
+zunel-bus.workspace = true
+zunel-channels.workspace = true
+zunel-config.workspace = true
+zunel-core.workspace = true
+zunel-heartbeat.workspace = true
+zunel-mcp.workspace = true
+zunel-mcp-self.workspace = true
+zunel-mcp-slack.workspace = true
+zunel-providers.workspace = true
+zunel-skills.workspace = true
+zunel-tools.workspace = true
+zunel-util.workspace = true
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+async-stream.workspace = true
+futures.workspace = true
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+predicates = "3"
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread"] }
+tokio-tungstenite.workspace = true

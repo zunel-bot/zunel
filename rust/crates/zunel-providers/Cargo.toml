@@ -1,0 +1,33 @@
+[package]
+name = "zunel-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+aws-config = { version = "1.8.16", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1.130.0"
+aws-smithy-types = "1.4.7"
+base64.workspace = true
+chrono.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zunel-config.workspace = true
+zunel-util.workspace = true
+
+[dev-dependencies]
+wiremock = { workspace = true }
+insta = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+proptest = { workspace = true }
+tempfile = { workspace = true }

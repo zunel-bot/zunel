@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-push hook: run the same gate CI does, so `cargo fmt --check` /
+# clippy / test failures don't reach origin. Install once with
+# `scripts/install-githooks.sh`.
+#
+# Skip with `git push --no-verify` when you really need to bypass it.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/check.sh"

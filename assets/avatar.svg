@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Zunel avatar">
+  <!-- Background -->
+  <rect width="256" height="256" rx="56" fill="#006AFF"/>
+
+  <!-- White chat bubble with tail at the bottom-left -->
+  <path d="M 64 52
+           H 192
+           Q 216 52 216 76
+           V 156
+           Q 216 180 192 180
+           H 88
+           L 52 220
+           L 68 180
+           H 64
+           Q 40 180 40 156
+           V 76
+           Q 40 52 64 52
+           Z"
+        fill="#ffffff"/>
+
+  <!-- Happy closed eyes (gentle upward arches) -->
+  <path d="M 80 112 Q 92 98 104 112"
+        fill="none" stroke="#006AFF" stroke-width="10" stroke-linecap="round"/>
+  <path d="M 152 112 Q 164 98 176 112"
+        fill="none" stroke="#006AFF" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- Smile -->
+  <path d="M 96 144 Q 128 168 160 144"
+        fill="none" stroke="#006AFF" stroke-width="10" stroke-linecap="round"/>
+</svg>

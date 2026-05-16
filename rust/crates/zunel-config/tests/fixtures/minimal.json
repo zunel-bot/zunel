@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "custom": {
+      "apiKey": "sk-test",
+      "apiBase": "https://api.openai.com/v1",
+      "extraHeaders": {
+        "X-Demo": "1"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "provider": "custom",
+      "model": "gpt-4o-mini",
+      "temperature": 0.2,
+      "maxTokens": 1024
+    }
+  }
+}

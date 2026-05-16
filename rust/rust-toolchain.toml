@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned (rather than `stable`) so CI runners with stale rustup caches
+# don't pick up a rustc < workspace MSRV. Bump in lockstep with
+# `[workspace.package].rust-version` in rust/Cargo.toml.
+channel = "1.95"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,37 @@
+[package]
+name = "zunel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+fd-lock.workspace = true
+futures.workspace = true
+pdf-extract = "0.10.0"
+quick-xml = "0.39.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+zip = { version = "5.0.1", default-features = false, features = ["deflate"] }
+zunel-bus.workspace = true
+zunel-config.workspace = true
+zunel-mcp.workspace = true
+zunel-providers.workspace = true
+zunel-skills.workspace = true
+zunel-tokens.workspace = true
+zunel-tools.workspace = true
+zunel-util.workspace = true
+
+[dev-dependencies]
+async-stream.workspace = true
+wiremock.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }

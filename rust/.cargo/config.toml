@@ -1,0 +1,9 @@
+# Deliberately no global rustflags. `-D warnings` is applied in CI only
+# (see `.github/workflows/rust-ci.yml`) so local dev builds don't fail on
+# harmless during-implementation warnings.
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
