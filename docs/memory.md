@@ -99,12 +99,33 @@ You can inspect and control memory from chat:
 | Command | What it does |
 |---------|--------------|
 | `/dream` | Run Dream immediately. Prints `processed N entries; edits: <files>; cursor → <n>` (CLI) or returns the same structure via `zunel_dream_run` (Slack). |
+| `/dream-log [N]` | Show the last N Dream commits from `memory/.git/` (default 20, max 200). Each row: short sha, ISO date, subject. Slack equivalent: `zunel_dream_log`. |
+| `/dream-restore <sha>` | Roll memory back to the state before `<sha>` landed. Destructive — pair with `/dream-log` to pick the sha. Slack equivalent: `zunel_dream_restore`. |
 
-In addition, the [`zunel-mcp-self`](self-tool.md) server exposes a
-read-only `zunel_dream_status` tool that returns the most recent run's
+The [`zunel-mcp-self`](self-tool.md) server also exposes a read-only
+`zunel_dream_status` tool that returns the most recent run's
 timestamp, processed-entry count, and edited files from
 `<workspace>/.zunel/scheduler.json` — useful for debugging without
 triggering a new pass.
+
+## Versioned Memory
+
+Every successful Dream consolidation pass lands as a commit in
+`<workspace>/memory/.git/`. The committer identity is pinned at the
+repo level to `Zunel Dream <dream@zunel.local>` so commits are always
+attributable regardless of your global git config, and commit signing
+is disabled inside the repo to avoid prompting for a GPG key on each
+pass.
+
+The repo is initialised lazily on the first successful pass, and
+commits land best-effort: if the `git` binary is missing or a
+transient error occurs, the pass logs a warning and continues with
+its on-disk edits intact.
+
+Use `/dream-log` to browse the history and `/dream-restore <sha>` to
+roll back. The restore op runs `git reset --hard <sha>~1` against
+the memory directory, so you can step backwards one Dream pass at a
+time when something looks wrong.
 
 ## Configuration
 

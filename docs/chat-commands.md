@@ -11,6 +11,8 @@ These commands work inside Slack conversations and local interactive agent sessi
 | `/reload` | Re-discover every configured MCP server without restarting the process. Use after restarting an MCP backend (or editing `~/.zunel/config.json`) so the agent picks up the freshly listed tools immediately. |
 | `/reload <server>` | Re-discover one MCP server by name (the same key under `tools.mcpServers` in `config.json`). Useful when only one backend went unhealthy. |
 | `/dream` | Run Dream memory consolidation now. Reports the number of processed history entries and which durable-memory files were edited. In Slack, ask the agent in plain language ("consolidate memory now") and it calls the [`zunel_dream_run`](#zunel-dream-run) tool. |
+| `/dream-log [N]` | Show the last N Dream commits (default 20, max 200). Each row: short sha + ISO date + subject. In Slack: ask "show me recent Dream changes" and the agent calls `zunel_dream_log`. |
+| `/dream-restore <sha>` | **Destructive.** Roll memory back to the state it was in before `<sha>` landed. Pair with `/dream-log` to pick the sha. In Slack: same flow via `zunel_dream_restore` (approval-gated when `tools.approvalRequired` is true). |
 | `/help` | Show available in-chat commands |
 
 > **Slack note:** `/reload` and the other `/`-prefixed commands above are
