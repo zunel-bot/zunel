@@ -88,6 +88,10 @@ pub struct GatewayScheduler {
     /// `with_message_bus`; when unset, heartbeat suggestions are
     /// only logged (pre-v1.1 behaviour, preserved).
     bus: Option<Arc<MessageBus>>,
+    /// Original config snapshot — kept so the scheduler can build
+    /// a fresh provider on demand for Dream's `provider_override`
+    /// (lets Dream run on a cheaper provider than the main agent).
+    cfg: Config,
 }
 
 impl GatewayScheduler {
@@ -107,6 +111,7 @@ impl GatewayScheduler {
             state: Arc::new(Mutex::new(state)),
             state_path,
             bus: None,
+            cfg: cfg.clone(),
         })
     }
 
@@ -161,8 +166,28 @@ impl GatewayScheduler {
         }
         tracing::info!("scheduler: running dream pass");
         let store = MemoryStore::new(self.workspace.clone());
-        let svc = DreamService::new(store, self.provider.clone(), self.model.clone())
-            .with_config(&self.dream_config);
+        // Dream may opt into a different provider (e.g. cheaper
+        // gpt-4o-mini for the analysis pass while the main agent
+        // runs on Bedrock). Falls back to the scheduler's
+        // main-provider handle when no override is configured.
+        let provider: Arc<dyn LLMProvider> = match self.dream_config.provider_override.as_deref() {
+            Some(name) if !name.is_empty() => {
+                match zunel_providers::build_provider_named(&self.cfg, name).await {
+                    Ok(p) => p,
+                    Err(err) => {
+                        tracing::warn!(
+                            override_name = name,
+                            error = %err,
+                            "scheduler: dream provider_override failed; falling back to main provider"
+                        );
+                        self.provider.clone()
+                    }
+                }
+            }
+            _ => self.provider.clone(),
+        };
+        let svc =
+            DreamService::new(store, provider, self.model.clone()).with_config(&self.dream_config);
         let record = match svc.run().await {
             Ok(outcome) => {
                 tracing::info!(

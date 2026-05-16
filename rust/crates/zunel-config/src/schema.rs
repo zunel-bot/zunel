@@ -292,6 +292,12 @@ pub const DEFAULT_MAX_TOKENS_FALLBACK: u32 = 1_024;
 pub struct DreamConfig {
     pub interval_h: Option<u32>,
     pub model_override: Option<String>,
+    /// Optional provider override for Dream's analysis + edit calls.
+    /// Lets the main agent run on (say) Bedrock while Dream uses a
+    /// cheaper OpenAI-compatible endpoint. The named key must exist
+    /// under `providers` (e.g. `"custom"`, `"codex"`, `"bedrock"`).
+    /// When unset, Dream inherits the main agent's provider.
+    pub provider_override: Option<String>,
     pub max_batch_size: Option<u32>,
     pub max_iterations: Option<u32>,
     pub annotate_line_ages: Option<bool>,

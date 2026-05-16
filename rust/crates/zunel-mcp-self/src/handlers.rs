@@ -287,6 +287,24 @@ fn tools_list() -> Value {
                     "required": ["text"]
                 }
             },
+            {
+                "name": "zunel_memory_read",
+                "description": "Return the durable-memory triple Dream maintains: USER.md, SOUL.md, MEMORY.md. Read-only — use this to answer 'what do you remember about me?' without scanning the workspace by hand. Returns {user, soul, memory, bytes} where bytes is the sum of file sizes.",
+                "inputSchema": {"type": "object", "properties": {}}
+            },
+            {
+                "name": "zunel_memory_history_tail",
+                "description": "Return the last N entries of `<workspace>/memory/history.jsonl` — the raw Stage-1 ledger Dream consumes from. Useful for debugging 'why didn't Dream pick this up?' Default limit 20, max 200.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}}
+                }
+            },
+            {
+                "name": "zunel_health",
+                "description": "Single-call self-diagnosis: returns {degraded: bool, reasons: [...]} based on workspace writability, scheduler freshness (Dream/Heartbeat last-run age vs configured interval), MCP server count, and config sanity. Use this when asked 'are you working?' or before suggesting a fix.",
+                "inputSchema": {"type": "object", "properties": {}}
+            },
             zunel_mcp_slack::capability_tool_descriptor()
         ]
     })
@@ -346,6 +364,11 @@ async fn call_tool(msg: &Value) -> Value {
         "zunel_heartbeat_task_remove" | "heartbeat_task_remove" => {
             wrap(heartbeat_task_remove(&call_args(msg)))
         }
+        "zunel_memory_read" | "memory_read" => wrap(memory_read()),
+        "zunel_memory_history_tail" | "memory_history_tail" => {
+            wrap(memory_history_tail(&call_args(msg)))
+        }
+        "zunel_health" | "health" => wrap(zunel_health()),
         "mcp_login_start" => {
             let args = call_args(msg);
             wrap(mcp_login_start(&args).await)
@@ -826,6 +849,178 @@ fn remove_json_path(root: &mut Value, path: &str) -> bool {
         return false;
     };
     obj.remove(*segments.last().unwrap()).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Memory introspection: lets the agent (or a chat user via the agent) inspect
+// the durable-memory surface Dream maintains.
+// ---------------------------------------------------------------------------
+
+/// Return the three durable-memory files Dream maintains. Missing
+/// files are reported as empty strings (rather than errors) so a
+/// fresh workspace doesn't trip the agent up.
+fn memory_read() -> Result<String> {
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let user = std::fs::read_to_string(workspace.join("USER.md")).unwrap_or_default();
+    let soul = std::fs::read_to_string(workspace.join("SOUL.md")).unwrap_or_default();
+    let memory =
+        std::fs::read_to_string(workspace.join("memory").join("MEMORY.md")).unwrap_or_default();
+    let bytes = user.len() + soul.len() + memory.len();
+    Ok(serde_json::to_string(&json!({
+        "user": user,
+        "soul": soul,
+        "memory": memory,
+        "bytes": bytes
+    }))?)
+}
+
+/// Return the last N entries from `<workspace>/memory/history.jsonl`,
+/// the Stage-1 ledger Dream consumes from. Limit clamped to [1, 200];
+/// default 20. Lines that fail to parse are reported in
+/// `malformed_lines_skipped` so the user can see drift.
+fn memory_history_tail(args: &Value) -> Result<String> {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 200) as usize;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let history_path = workspace.join("memory").join("history.jsonl");
+    if !history_path.exists() {
+        return Ok(serde_json::to_string(&json!({
+            "count": 0,
+            "entries": [],
+            "note": "history.jsonl does not exist yet — Stage 1 has not appended anything"
+        }))?);
+    }
+    let raw = std::fs::read_to_string(&history_path)
+        .with_context(|| format!("reading {}", history_path.display()))?;
+    let mut parsed: Vec<Value> = Vec::new();
+    let mut malformed = 0usize;
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(v) => parsed.push(v),
+            Err(_) => malformed += 1,
+        }
+    }
+    let total = parsed.len();
+    if parsed.len() > limit {
+        parsed = parsed.split_off(parsed.len() - limit);
+    }
+    Ok(serde_json::to_string(&json!({
+        "count": parsed.len(),
+        "total": total,
+        "malformed_lines_skipped": malformed,
+        "entries": parsed
+    }))?)
+}
+
+// ---------------------------------------------------------------------------
+// Health derived signal.
+// ---------------------------------------------------------------------------
+
+/// Single-call self-diagnosis. Returns `{ degraded, reasons }`. The
+/// agent can use this before suggesting a fix or in response to "are
+/// you working?" instead of polling four separate tools.
+///
+/// Signals checked:
+///   - workspace dir exists and is writable
+///   - config has a non-empty default model
+///   - at least one MCP server is registered (informational; not
+///     itself degraded)
+///   - scheduler.json's last_dream_at is within 2x the configured
+///     dream interval (when dream is enabled)
+///   - scheduler.json's last_heartbeat_at is within 2x the
+///     configured heartbeat interval (when heartbeat is enabled)
+fn zunel_health() -> Result<String> {
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let mut reasons: Vec<String> = Vec::new();
+
+    if !workspace.exists() {
+        reasons.push(format!("workspace {} does not exist", workspace.display()));
+    } else {
+        let probe = workspace.join(".zunel_health_probe");
+        match std::fs::write(&probe, b"probe") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(err) => reasons.push(format!("workspace not writable: {err}")),
+        }
+    }
+
+    if cfg.agents.defaults.model.trim().is_empty() {
+        reasons.push("agents.defaults.model is empty".into());
+    }
+
+    let mcp_servers = cfg.tools.mcp_servers.len();
+
+    let scheduler_path = workspace.join(".zunel").join("scheduler.json");
+    let mut last_dream_at: Option<DateTime<chrono::Utc>> = None;
+    let mut last_heartbeat_at: Option<DateTime<chrono::Utc>> = None;
+    if scheduler_path.exists() {
+        if let Some(state) = std::fs::read_to_string(&scheduler_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            last_dream_at = state
+                .get("last_dream_at")
+                .and_then(Value::as_str)
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc));
+            last_heartbeat_at = state
+                .get("last_heartbeat_at")
+                .and_then(Value::as_str)
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc));
+        }
+    }
+
+    if let Some(h) = cfg.agents.defaults.dream.interval_h {
+        if h > 0 {
+            let stale_after = chrono::Duration::hours((h as i64) * 2);
+            match last_dream_at {
+                None => reasons.push("dream is enabled but has never run".into()),
+                Some(at) if chrono::Utc::now() - at > stale_after => reasons.push(format!(
+                    "last dream run {} is older than 2× interval ({}h)",
+                    at, h
+                )),
+                _ => {}
+            }
+        }
+    }
+    if cfg.gateway.heartbeat.enabled && cfg.gateway.heartbeat.interval_s > 0 {
+        let stale_after = chrono::Duration::seconds((cfg.gateway.heartbeat.interval_s as i64) * 2);
+        match last_heartbeat_at {
+            None => reasons.push("heartbeat is enabled but has never run".into()),
+            Some(at) if chrono::Utc::now() - at > stale_after => reasons.push(format!(
+                "last heartbeat run {} is older than 2× interval ({}s)",
+                at, cfg.gateway.heartbeat.interval_s
+            )),
+            _ => {}
+        }
+    }
+
+    Ok(serde_json::to_string(&json!({
+        "degraded": !reasons.is_empty(),
+        "reasons": reasons,
+        "info": {
+            "workspace": workspace.display().to_string(),
+            "model": cfg.agents.defaults.model,
+            "provider": cfg.agents.defaults.provider,
+            "mcp_servers": mcp_servers,
+            "last_dream_at": last_dream_at,
+            "last_heartbeat_at": last_heartbeat_at,
+            "dream_interval_h": cfg.agents.defaults.dream.interval_h,
+            "heartbeat_interval_s": cfg.gateway.heartbeat.interval_s,
+            "heartbeat_enabled": cfg.gateway.heartbeat.enabled,
+        }
+    }))?)
 }
 
 /// Reject skill names that could escape the skills directory or

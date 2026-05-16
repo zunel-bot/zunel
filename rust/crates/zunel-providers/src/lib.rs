@@ -16,7 +16,7 @@ pub use base::{
     ToolCallRequest, ToolProgress, ToolSchema, Usage,
 };
 pub use bedrock::BedrockProvider;
-pub use build::build_provider;
+pub use build::{build_provider, build_provider_named};
 pub use error::{Error, Result};
 pub use openai_compat::OpenAICompatProvider;
 pub use tool_call_accumulator::{ToolCallAccumulator, ToolCallAssemblyError};
