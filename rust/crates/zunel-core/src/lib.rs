@@ -11,6 +11,7 @@ mod error;
 pub mod hook;
 pub mod mcp_reconnect;
 mod memory;
+pub mod memory_repo;
 pub mod runner;
 mod session;
 pub mod subagent;
@@ -34,6 +35,7 @@ pub use dream_tool::DreamRunTool;
 pub use error::{Error, Result};
 pub use hook::{AgentHook, AgentHookContext};
 pub use memory::{DreamCursor, DreamOutcome, DreamService, HistoryEntry, MemoryStore};
+pub use memory_repo::{DreamCommit, DreamMemoryRepo};
 pub use runner::{
     trim_messages_for_provider, AgentRunResult, AgentRunSpec, AgentRunner, StopReason, TrimBudgets,
 };

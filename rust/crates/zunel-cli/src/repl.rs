@@ -239,6 +239,31 @@ async fn handle_command(
             }
             Ok(LineFlow::Continue)
         }
+        Some(CommandOutcome::DreamLog { limit }) => {
+            match agent_loop.dream_log(limit) {
+                Ok(commits) if commits.is_empty() => {
+                    println!("Dream log: no commits yet. Run /dream to consolidate.");
+                }
+                Ok(commits) => {
+                    for c in commits {
+                        let short = c.sha.chars().take(8).collect::<String>();
+                        println!("{}  {}  {}", short, c.date, c.subject);
+                    }
+                }
+                Err(err) => println!("/dream-log failed: {err}"),
+            }
+            Ok(LineFlow::Continue)
+        }
+        Some(CommandOutcome::DreamRestore { sha }) => {
+            match agent_loop.dream_restore(&sha) {
+                Ok(new_head) => println!(
+                    "Dream-restore: rolled back to {} (now HEAD).",
+                    new_head.chars().take(8).collect::<String>()
+                ),
+                Err(err) => println!("/dream-restore failed: {err}"),
+            }
+            Ok(LineFlow::Continue)
+        }
         None => {
             println!("Unknown command: {line}. Try /help.");
             Ok(LineFlow::Continue)

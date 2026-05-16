@@ -32,6 +32,11 @@ pub enum CommandOutcome {
     /// CLI REPL because it owns the `Arc<AgentLoop>` with the
     /// configured provider, model, and memory store.
     RunDream,
+    /// Show the most recent Dream consolidation commits from the
+    /// `memory/.git` repo. `limit` defaults to 20.
+    DreamLog { limit: usize },
+    /// Roll back the memory dir to the state *before* `sha`.
+    DreamRestore { sha: String },
 }
 
 type BoxedHandler = Box<
@@ -116,6 +121,8 @@ pub mod builtins {
             "/clear — Clear the current conversation",
             "/status — Show bot status",
             "/dream — Run a Dream memory-consolidation pass now",
+            "/dream-log [N] — Show the last N Dream commits (default 20)",
+            "/dream-restore <sha> — Roll memory back to before <sha>",
             "/reload [server] — Re-discover MCP servers (or one by name) without restart",
             "/restart — Restart the process",
             "/exit — Exit the REPL (alias: /quit)",
@@ -144,6 +151,28 @@ pub mod builtins {
         });
         router.register_exact("/dream", |_ctx: CommandContext| async {
             Ok::<_, crate::Error>(CommandOutcome::RunDream)
+        });
+        // `/dream-log` (no arg) shows the latest 20 commits;
+        // `/dream-log <N>` shows N (clamped to [1, 200]).
+        router.register_exact("/dream-log", |_ctx: CommandContext| async {
+            Ok::<_, crate::Error>(CommandOutcome::DreamLog { limit: 20 })
+        });
+        router.register_prefix("/dream-log ", |ctx: CommandContext| async move {
+            let n = ctx.args.trim().parse::<usize>().unwrap_or(20).clamp(1, 200);
+            Ok::<_, crate::Error>(CommandOutcome::DreamLog { limit: n })
+        });
+        // `/dream-restore <sha>` requires a sha and is destructive
+        // (rewrites memory/ to the parent of <sha>). Empty-arg form
+        // is rejected to avoid surprising the user.
+        router.register_prefix("/dream-restore ", |ctx: CommandContext| async move {
+            let sha = ctx.args.trim().to_string();
+            if sha.is_empty() {
+                return Ok::<_, crate::Error>(CommandOutcome::Reply(
+                    "Usage: /dream-restore <sha>. List recent commits with /dream-log first."
+                        .into(),
+                ));
+            }
+            Ok::<_, crate::Error>(CommandOutcome::DreamRestore { sha })
         });
         // `/reload` (no arg) reloads every configured MCP server;
         // `/reload <name>` reloads one. Both shapes resolve to the

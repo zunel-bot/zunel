@@ -18,6 +18,7 @@ use crate::default_tools::{reload_mcp_servers, ReloadReport};
 use crate::document::extract_documents;
 use crate::error::Result;
 use crate::memory::{DreamOutcome, DreamService, MemoryStore};
+use crate::memory_repo::{DreamCommit, DreamMemoryRepo};
 use crate::runner::{AgentRunSpec, AgentRunner, TrimBudgets};
 use crate::session::{ChatRole, Session, SessionManager};
 use crate::trim::chat_message_to_value;
@@ -331,6 +332,25 @@ impl AgentLoop {
             .write()
             .expect("zunel tool registry lock poisoned");
         Arc::make_mut(&mut *guard).unregister(name).is_some()
+    }
+
+    /// Return the most recent `limit` Dream-memory commits from
+    /// `<workspace>/memory/.git/`. Empty when no Dream pass has
+    /// ever committed (first launch, or git unavailable).
+    pub fn dream_log(&self, limit: usize) -> Result<Vec<DreamCommit>> {
+        let repo = DreamMemoryRepo::new(&self.workspace);
+        repo.log(limit)
+            .map_err(|e| crate::error::Error::Other(format!("dream_log: {e}")))
+    }
+
+    /// Restore the memory dir to the state it had *before* the
+    /// commit at `sha` landed. Returns the new HEAD sha. Errors
+    /// surface to the caller — this is destructive enough that the
+    /// REPL prompts for confirmation before invoking.
+    pub fn dream_restore(&self, sha: &str) -> Result<String> {
+        let repo = DreamMemoryRepo::new(&self.workspace);
+        repo.restore_before(sha)
+            .map_err(|e| crate::error::Error::Other(format!("dream_restore: {e}")))
     }
 
     /// Run a Dream consolidation pass now using this loop's configured

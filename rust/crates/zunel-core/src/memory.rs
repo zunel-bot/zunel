@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::error::{Error, Result};
+use crate::memory_repo::DreamMemoryRepo;
 use crate::{AgentRunSpec, AgentRunner, AllowAllApprovalHandler, StopReason};
 use tokio::sync::mpsc;
 use zunel_config::DreamConfig;
@@ -351,6 +352,24 @@ impl DreamService {
         let cursor_advanced_to = if made_edits {
             cursor.write(new_cursor)?;
             self.store.compact_history()?;
+            // Record the pass as a commit in the memory-repo so
+            // /dream-log and /dream-restore have something to show.
+            // Best-effort: a missing `git` binary or a transient
+            // git error logs a warning but does not fail the pass —
+            // the in-memory edits are already on disk.
+            let repo = DreamMemoryRepo::new(&self.store.workspace);
+            let subject = format!(
+                "dream pass: {} entries via {}",
+                processed_entries,
+                result.tools_used.join(",")
+            );
+            match repo.commit_all(&subject) {
+                Ok(Some(sha)) => tracing::info!(sha, "dream: committed pass to memory repo"),
+                Ok(None) => tracing::debug!("dream: no diff to commit (rare)"),
+                Err(err) => {
+                    tracing::warn!(error = %err, "dream: memory-repo commit skipped")
+                }
+            }
             Some(new_cursor)
         } else {
             tracing::warn!(

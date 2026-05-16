@@ -305,6 +305,23 @@ fn tools_list() -> Value {
                 "description": "Single-call self-diagnosis: returns {degraded: bool, reasons: [...]} based on workspace writability, scheduler freshness (Dream/Heartbeat last-run age vs configured interval), MCP server count, and config sanity. Use this when asked 'are you working?' or before suggesting a fix.",
                 "inputSchema": {"type": "object", "properties": {}}
             },
+            {
+                "name": "zunel_dream_log",
+                "description": "Return the most recent Dream consolidation commits from `<workspace>/memory/.git/`. Each entry has `sha`, `date` (ISO 8601), `subject`. Pair with `zunel_dream_restore` to roll back a regrettable edit. `limit` defaults to 20, max 200.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}}
+                }
+            },
+            {
+                "name": "zunel_dream_restore",
+                "description": "DESTRUCTIVE: roll the memory dir back to the state it was in *before* `sha` landed. Use the user's explicit sha (or short prefix) from `zunel_dream_log` — never invent one. Returns the new HEAD sha on success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"sha": {"type": "string"}},
+                    "required": ["sha"]
+                }
+            },
             zunel_mcp_slack::capability_tool_descriptor()
         ]
     })
@@ -369,6 +386,8 @@ async fn call_tool(msg: &Value) -> Value {
             wrap(memory_history_tail(&call_args(msg)))
         }
         "zunel_health" | "health" => wrap(zunel_health()),
+        "zunel_dream_log" | "dream_log" => wrap(dream_log_tool(&call_args(msg))),
+        "zunel_dream_restore" | "dream_restore" => wrap(dream_restore_tool(&call_args(msg))),
         "mcp_login_start" => {
             let args = call_args(msg);
             wrap(mcp_login_start(&args).await)
@@ -1020,6 +1039,132 @@ fn zunel_health() -> Result<String> {
             "heartbeat_interval_s": cfg.gateway.heartbeat.interval_s,
             "heartbeat_enabled": cfg.gateway.heartbeat.enabled,
         }
+    }))?)
+}
+
+// ---------------------------------------------------------------------------
+// Versioned-memory wrappers. The canonical implementation lives in
+// `zunel-core::memory_repo::DreamMemoryRepo` (used by the CLI REPL); this
+// MCP server is in a separate crate that doesn't depend on zunel-core, so
+// the git operations are shelled-out inline here. The two surfaces must
+// agree on field separators and reset semantics.
+// ---------------------------------------------------------------------------
+
+fn dream_log_tool(args: &Value) -> Result<String> {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 200) as usize;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let memory_dir = workspace.join("memory");
+    if !memory_dir.join(".git").exists() {
+        return Ok(serde_json::to_string(&json!({
+            "count": 0,
+            "commits": [],
+            "note": "memory/.git does not exist — no Dream pass has committed yet"
+        }))?);
+    }
+    let limit_str = limit.to_string();
+    let format = "%H\x1f%aI\x1f%s";
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&memory_dir)
+        .args([
+            "log",
+            "-z",
+            &format!("--pretty=format:{format}"),
+            "-n",
+            &limit_str,
+        ])
+        .output()
+        .context("invoking git")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut commits: Vec<Value> = Vec::new();
+    for rec in String::from_utf8_lossy(&out.stdout).split('\0') {
+        if rec.is_empty() {
+            continue;
+        }
+        let mut parts = rec.split('\x1f');
+        let sha = parts.next().unwrap_or_default().trim().to_string();
+        let date = parts.next().unwrap_or_default().trim().to_string();
+        let subject = parts.next().unwrap_or_default().trim().to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        commits.push(json!({
+            "sha": sha,
+            "date": date,
+            "subject": subject
+        }));
+    }
+    Ok(serde_json::to_string(&json!({
+        "count": commits.len(),
+        "commits": commits
+    }))?)
+}
+
+fn dream_restore_tool(args: &Value) -> Result<String> {
+    let sha = required_str(args, "sha")?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let memory_dir = workspace.join("memory");
+    if !memory_dir.join(".git").exists() {
+        anyhow::bail!("memory/.git does not exist — nothing to restore");
+    }
+    // Resolve the sha to a full commit hash (and reject malformed input).
+    let resolved = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&memory_dir)
+        .args(["rev-parse", "--verify", &format!("{sha}^{{commit}}")])
+        .output()
+        .context("git rev-parse")?;
+    if !resolved.status.success() {
+        anyhow::bail!(
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&resolved.stderr).trim()
+        );
+    }
+    let resolved = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+    let parent = format!("{resolved}~1");
+    let parent_check = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&memory_dir)
+        .args(["rev-parse", "--verify", &parent])
+        .output()
+        .context("git rev-parse parent")?;
+    if !parent_check.status.success() {
+        anyhow::bail!("commit {resolved} is the root commit; nothing to restore to");
+    }
+    let reset = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&memory_dir)
+        .args(["reset", "--hard", "--quiet", &parent])
+        .output()
+        .context("git reset")?;
+    if !reset.status.success() {
+        anyhow::bail!(
+            "git reset failed: {}",
+            String::from_utf8_lossy(&reset.stderr).trim()
+        );
+    }
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&memory_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .context("git rev-parse HEAD")?;
+    let new_head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    Ok(serde_json::to_string(&json!({
+        "status": "ok",
+        "new_head": new_head,
+        "restored_before": sha
     }))?)
 }
 
