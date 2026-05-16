@@ -14,6 +14,49 @@ use zunel_tools::{
 const DEFAULT_DREAM_BATCH_SIZE: usize = 20;
 const DEFAULT_DREAM_MAX_ITERATIONS: usize = 10;
 
+/// Phase-1 system prompt for the cheap analysis pass. Goes beyond the
+/// historical one-liner ("Analyze history…") to: (a) name the criteria
+/// for "durable", (b) constrain to facts present in the input, (c)
+/// require explicit keep/add/update/remove decisions so phase 2 has
+/// concrete edits to apply.
+const DREAM_PHASE1_SYSTEM: &str = "\
+You are the analysis half of Zunel's Dream memory-consolidation \
+pipeline. Read the recent conversation slices in the history block \
+and produce a short, structured analysis of what (if anything) \
+belongs in long-term memory.
+
+Durable knowledge is information that will still matter in 30 days: \
+the user's stable preferences, recurring constraints, project goals, \
+ongoing decisions, and named entities (people, repos, services) the \
+user works with. Skip transient state, in-flight troubleshooting, \
+and one-off chit-chat.
+
+Ground every recommendation in something explicitly present in the \
+history block. Do not infer beyond it, and do not invent facts.
+
+Compare your candidate facts against the existing MEMORY.md / \
+SOUL.md / USER.md content provided. For each candidate fact, decide \
+explicitly: keep, add, update, or remove. Output a short list of \
+those decisions in plain prose (no JSON, no headings — phase 2 will \
+read your prose and apply the edits with file tools).";
+
+/// Phase-2 system prompt for the edit runner.
+const DREAM_PHASE2_SYSTEM: &str = "\
+You are the edit half of Zunel's Dream memory pipeline. Apply the \
+analysis below by editing MEMORY.md / SOUL.md / USER.md (and, if \
+appropriate, files under skills/). Use the read_file, edit_file, \
+and write_file tools — nothing else. Make every edit small and \
+targeted; do not rewrite a file wholesale unless the analysis \
+explicitly asks for that.
+
+Only edit files inside this restricted set:
+- memory/MEMORY.md
+- SOUL.md
+- USER.md
+- skills/<name>/SKILL.md
+
+If the analysis suggests no concrete edit, simply stop.";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
     pub cursor: u64,
@@ -21,6 +64,31 @@ pub struct HistoryEntry {
     pub content: String,
 }
 
+/// Structured outcome of a single `DreamService::run` pass.
+///
+/// `processed_entries == 0` means there was nothing in
+/// `memory/history.jsonl` past the last cursor (a no-op tick).
+/// `edited_files` lists the tool names the phase-2 runner invoked
+/// (typically `write_file` / `edit_file`); an empty vec on a non-zero
+/// processed count means the model produced analysis but did not apply
+/// any concrete edits.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DreamOutcome {
+    pub processed_entries: usize,
+    pub edited_files: Vec<String>,
+    pub cursor_advanced_to: Option<u64>,
+}
+
+impl DreamOutcome {
+    /// True when the run consumed input AND the model actually wrote
+    /// at least one edit. Used by callers to decide whether to record
+    /// `last_dream_at` (so a no-op pass doesn't suppress the next).
+    pub fn is_active(&self) -> bool {
+        self.processed_entries > 0 && !self.edited_files.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MemoryStore {
     workspace: PathBuf,
     max_history_entries: usize,
@@ -33,6 +101,13 @@ pub struct DreamService {
     max_batch_size: usize,
     max_iterations: usize,
     annotate_line_ages: bool,
+    /// Provider settings for the phase-1 analysis call AND the
+    /// phase-2 edit runner. Defaults to a deterministic, low-cost
+    /// profile (temperature 0, modest max-tokens) to match
+    /// `CompactionService` rather than the silently-defaulted
+    /// `GenerationSettings::default()` Dream used to ship with —
+    /// that ignored any user-configured temperature/max_tokens.
+    settings: GenerationSettings,
 }
 
 impl DreamService {
@@ -44,7 +119,21 @@ impl DreamService {
             max_batch_size: DEFAULT_DREAM_BATCH_SIZE,
             max_iterations: DEFAULT_DREAM_MAX_ITERATIONS,
             annotate_line_ages: false,
+            settings: GenerationSettings {
+                temperature: Some(0.0),
+                max_tokens: Some(8192),
+                reasoning_effort: None,
+            },
         }
+    }
+
+    /// Override the per-pass [`GenerationSettings`]. The gateway
+    /// scheduler passes the same settings the main agent uses (or a
+    /// Dream-specific override) so a configured `temperature` /
+    /// `max_tokens` actually reaches the analysis call.
+    pub fn with_settings(mut self, settings: GenerationSettings) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// Apply user-facing `agents.defaults.dream` overrides.
@@ -97,14 +186,15 @@ impl DreamService {
         &self.model
     }
 
-    pub async fn run(&self) -> Result<bool> {
+    pub async fn run(&self) -> Result<DreamOutcome> {
         let cursor = DreamCursor::new(self.store.workspace.clone());
         let last_cursor = cursor.read()?;
         let entries = self.store.read_unprocessed_history(last_cursor)?;
         if entries.is_empty() {
-            return Ok(false);
+            return Ok(DreamOutcome::default());
         }
         let batch: Vec<HistoryEntry> = entries.into_iter().take(self.max_batch_size).collect();
+        let processed_entries = batch.len();
         let now = chrono::Local::now();
         let history_text = batch
             .iter()
@@ -130,20 +220,45 @@ impl DreamService {
             .generate(
                 &self.model,
                 &[
-                    ChatMessage::system("Analyze history for long-term Dream memory updates."),
+                    ChatMessage::system(DREAM_PHASE1_SYSTEM),
                     ChatMessage::user(format!(
                         "## Conversation History\n{history_text}\n\n{file_context}"
                     )),
                 ],
                 &[],
-                &GenerationSettings::default(),
+                &self.settings,
             )
             .await
             .map_err(Error::Provider)?;
         let analysis = phase1.content.unwrap_or_default();
+        // Guard against unusable analyses — empty output or a few
+        // stray tokens means the cheap analysis model returned
+        // nothing actionable. Skip phase 2 and don't advance the
+        // cursor so the batch is retried on the next pass.
+        if analysis.trim().len() < 32 {
+            tracing::warn!(
+                bytes = analysis.trim().len(),
+                "dream: phase 1 analysis too short; skipping phase 2 and leaving cursor untouched"
+            );
+            return Ok(DreamOutcome {
+                processed_entries,
+                edited_files: Vec::new(),
+                cursor_advanced_to: None,
+            });
+        }
 
         let mut tools = ToolRegistry::new();
-        let policy = PathPolicy::restricted(&self.store.workspace);
+        // Tight policy: Dream may read/write only the durable-memory
+        // surface — `memory/` (MEMORY.md, history.jsonl, .cursor),
+        // `SOUL.md`, `USER.md`, and `skills/`. Everything else under
+        // the workspace (sessions/, .zunel/, cron/) is off-limits so
+        // a confused model cannot corrupt session logs, scheduler
+        // state, or cron jobs.
+        let memory_root = self.store.workspace.join("memory");
+        let policy = PathPolicy::restricted(&memory_root)
+            .with_allowed_extra(&self.store.workspace.join("SOUL.md"))
+            .with_allowed_extra(&self.store.workspace.join("USER.md"))
+            .with_allowed_extra(&self.store.workspace.join("skills"));
         tools.register(Arc::new(ReadFileTool::new(policy.clone())));
         tools.register(Arc::new(EditFileTool::new(policy.clone())));
         tools.register(Arc::new(WriteFileTool::new(policy)));
@@ -157,14 +272,13 @@ impl DreamService {
             .run(
                 AgentRunSpec {
                     initial_messages: vec![
-                        ChatMessage::system(
-                            "Apply Dream updates by editing MEMORY.md, SOUL.md, USER.md, or skills.",
-                        ),
+                        ChatMessage::system(DREAM_PHASE2_SYSTEM),
                         ChatMessage::user(format!(
                             "## Analysis Result\n{analysis}\n\n{file_context}"
                         )),
                     ],
                     model: self.model.clone(),
+                    settings: self.settings.clone(),
                     max_iterations: self.max_iterations,
                     workspace: self.store.workspace.clone(),
                     session_key: "dream:memory".into(),
@@ -178,9 +292,30 @@ impl DreamService {
             .last()
             .map(|entry| entry.cursor)
             .unwrap_or(last_cursor);
-        cursor.write(new_cursor)?;
-        self.store.compact_history()?;
-        Ok(result.stop_reason == StopReason::Completed || !result.tools_used.is_empty())
+        // Only advance the cursor when the model actually produced at
+        // least one tool-driven edit AND reached `Completed`. A
+        // `MaxIterations` outcome or a zero-edit return means the
+        // analysis was unusable — retry the same batch on the next
+        // tick rather than silently consuming the input.
+        let made_edits =
+            result.stop_reason == StopReason::Completed && !result.tools_used.is_empty();
+        let cursor_advanced_to = if made_edits {
+            cursor.write(new_cursor)?;
+            self.store.compact_history()?;
+            Some(new_cursor)
+        } else {
+            tracing::warn!(
+                stop_reason = ?result.stop_reason,
+                tools_used = ?result.tools_used,
+                "dream: phase 2 made no edits — cursor not advanced; batch will be retried"
+            );
+            None
+        };
+        Ok(DreamOutcome {
+            processed_entries,
+            edited_files: result.tools_used.clone(),
+            cursor_advanced_to,
+        })
     }
 }
 

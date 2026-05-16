@@ -22,17 +22,54 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use zunel_config::{Config, DreamConfig, HeartbeatConfig};
-use zunel_core::{DreamService, MemoryStore};
+use zunel_core::{DreamOutcome, DreamService, MemoryStore};
 use zunel_heartbeat::HeartbeatService;
 use zunel_providers::LLMProvider;
 
 const TICK_SECS: u64 = 30;
 const STATE_FILENAME: &str = "scheduler.json";
 
+/// Persistent record of the most recent Dream pass, surfaced through
+/// the self MCP server so users (and the agent itself) can answer
+/// "did Dream run, when, and what did it edit?" — turning Dream from
+/// an opaque scheduled job into something debuggable.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct LastDreamRecord {
+    pub at: DateTime<Utc>,
+    pub processed_entries: usize,
+    pub edited_files: Vec<String>,
+    pub cursor_advanced_to: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl LastDreamRecord {
+    fn from_outcome(now: DateTime<Utc>, outcome: &DreamOutcome) -> Self {
+        Self {
+            at: now,
+            processed_entries: outcome.processed_entries,
+            edited_files: outcome.edited_files.clone(),
+            cursor_advanced_to: outcome.cursor_advanced_to,
+            error: None,
+        }
+    }
+
+    fn from_error(now: DateTime<Utc>, error: &str) -> Self {
+        Self {
+            at: now,
+            processed_entries: 0,
+            edited_files: Vec::new(),
+            cursor_advanced_to: None,
+            error: Some(error.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct SchedulerState {
     last_dream_at: Option<DateTime<Utc>>,
     last_heartbeat_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_dream_outcome: Option<LastDreamRecord>,
 }
 
 #[derive(Clone)]
@@ -109,9 +146,24 @@ impl GatewayScheduler {
         let store = MemoryStore::new(self.workspace.clone());
         let svc = DreamService::new(store, self.provider.clone(), self.model.clone())
             .with_config(&self.dream_config);
-        let _ = svc.run().await; // failures already logged inside DreamService
+        let record = match svc.run().await {
+            Ok(outcome) => {
+                tracing::info!(
+                    processed = outcome.processed_entries,
+                    edits = ?outcome.edited_files,
+                    cursor = ?outcome.cursor_advanced_to,
+                    "scheduler: dream pass complete",
+                );
+                LastDreamRecord::from_outcome(now, &outcome)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "scheduler: dream pass failed");
+                LastDreamRecord::from_error(now, &err.to_string())
+            }
+        };
         let mut state = self.state.lock().await;
         state.last_dream_at = Some(now);
+        state.last_dream_outcome = Some(record);
         save_state(&self.state_path, &state)?;
         Ok(())
     }

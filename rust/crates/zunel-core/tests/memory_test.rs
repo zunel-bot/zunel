@@ -185,7 +185,14 @@ async fn dream_service_processes_history_updates_memory_and_advances_cursor() {
     });
     let dream = DreamService::new(store, provider, "m".into());
 
-    assert!(dream.run().await.unwrap());
+    let outcome = dream.run().await.unwrap();
+    assert_eq!(outcome.processed_entries, 1);
+    assert!(outcome.is_active(), "edit applied, cursor advanced");
+    assert_eq!(outcome.cursor_advanced_to, Some(1));
+    assert!(outcome
+        .edited_files
+        .iter()
+        .any(|t| t == "write_file" || t == "edit_file"));
     assert_eq!(
         std::fs::read_to_string(tmp.path().join("memory").join("MEMORY.md")).unwrap(),
         "# Memory\n\n- user likes Rust"

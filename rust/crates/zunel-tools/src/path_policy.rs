@@ -26,6 +26,17 @@ impl PathPolicy {
         self
     }
 
+    /// Append an additional allowed root — either a directory or a
+    /// single file. Used by the Dream service to scope its
+    /// `write_file`/`edit_file` tools to a narrow allowlist
+    /// (`memory/`, `SOUL.md`, `USER.md`, `skills/`) so a confused
+    /// model can't accidentally rewrite `sessions/`, `.zunel/`, or
+    /// any other workspace child.
+    pub fn with_allowed_extra(mut self, extra: &Path) -> Self {
+        self.allowed_extras.push(normalize(extra));
+        self
+    }
+
     pub fn check(&self, path: &Path) -> Result<PathBuf> {
         let resolved = normalize(path);
         let Some(root) = &self.restrict_to else {

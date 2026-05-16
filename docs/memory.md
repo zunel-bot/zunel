@@ -98,17 +98,13 @@ You can inspect and control memory from chat:
 
 | Command | What it does |
 |---------|--------------|
-| `/dream` | Run Dream immediately |
-| `/dream-log` | Show the latest Dream memory change |
-| `/dream-log <sha>` | Show a specific Dream change |
-| `/dream-restore` | List recent Dream memory versions |
-| `/dream-restore <sha>` | Restore memory to the state before a specific change |
+| `/dream` | Run Dream immediately. Prints `processed N entries; edits: <files>; cursor → <n>` (CLI) or returns the same structure via `zunel_dream_run` (Slack). |
 
-## Versioned Memory
-
-After Dream changes the long-term memory files, Zunel records those edits in a
-local git-backed store. That gives you a history you can inspect, compare, and
-restore.
+In addition, the [`zunel-mcp-self`](self-tool.md) server exposes a
+read-only `zunel_dream_status` tool that returns the most recent run's
+timestamp, processed-entry count, and edited files from
+`<workspace>/.zunel/scheduler.json` — useful for debugging without
+triggering a new pass.
 
 ## Configuration
 

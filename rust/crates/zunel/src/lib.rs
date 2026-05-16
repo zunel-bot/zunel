@@ -83,6 +83,8 @@ impl Zunel {
                 max_iterations: 15,
                 tools: tool_names,
                 subagents,
+                iteration_counter: None,
+                live_tools: None,
             }),
         )));
         // Wrap in a shared handle so `mcp_reconnect` mutates the same

@@ -992,30 +992,21 @@ async fn build_gateway_agent_loop(
         .with_child_tools(child_tools),
     );
     registry.register(Arc::new(SpawnTool::new(subagents.clone())));
+    registry.register(Arc::new(zunel_core::DreamRunTool::new(
+        zunel_core::MemoryStore::new(workspace.clone()),
+        provider.clone(),
+        cfg.agents.defaults.model.clone(),
+        cfg.agents.defaults.dream.clone(),
+    )));
+    // Construct the agent loop first so we can hand its iteration
+    // counter Arc to `RuntimeSelfStateProvider` before registering
+    // `self` into the shared registry.
+    let agent_loop_for_counter =
+        AgentLoop::with_sessions(provider.clone(), cfg.agents.defaults.clone(), sessions);
+    let iteration_counter = agent_loop_for_counter.iteration_counter();
     let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
     tool_names.push("self".into());
     tool_names.push("mcp_reconnect".into());
-    registry.register(Arc::new(SelfTool::from_provider(Arc::new(
-        RuntimeSelfStateProvider {
-            model: cfg.agents.defaults.model.clone(),
-            provider: cfg
-                .agents
-                .defaults
-                .provider
-                .clone()
-                .unwrap_or_else(|| "custom".into()),
-            workspace: workspace.display().to_string(),
-            max_iterations: cfg
-                .agents
-                .defaults
-                .max_tool_iterations
-                .unwrap_or(15)
-                .try_into()
-                .unwrap_or(u32::MAX),
-            tools: tool_names,
-            subagents,
-        },
-    ))));
 
     // Wrap the registry in a shared handle so the `mcp_reconnect`
     // native tool can splice MCP entries in/out at runtime against
@@ -1027,6 +1018,29 @@ async fn build_gateway_agent_loop(
         let mut guard = shared_registry
             .write()
             .expect("zunel tool registry lock poisoned");
+        Arc::make_mut(&mut *guard).register(Arc::new(SelfTool::from_provider(Arc::new(
+            RuntimeSelfStateProvider {
+                model: cfg.agents.defaults.model.clone(),
+                provider: cfg
+                    .agents
+                    .defaults
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "custom".into()),
+                workspace: workspace.display().to_string(),
+                max_iterations: cfg
+                    .agents
+                    .defaults
+                    .max_tool_iterations
+                    .unwrap_or(15)
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+                tools: tool_names,
+                subagents,
+                iteration_counter: Some(iteration_counter),
+                live_tools: Some(Arc::clone(&shared_registry)),
+            },
+        ))));
         Arc::make_mut(&mut *guard).register(Arc::new(McpReconnectTool::new(
             Arc::clone(&shared_registry),
             config_path.map(Path::to_path_buf),
@@ -1038,15 +1052,15 @@ async fn build_gateway_agent_loop(
     // collisions; embedded builtins fill in otherwise.
     let skills = zunel_skills::SkillsLoader::new(&workspace, None, &[]);
 
-    Ok(
-        AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
-            .with_tools_arc(shared_registry)
-            .with_workspace(workspace)
-            .with_skills(skills)
-            .with_approval_required(cfg.tools.approval_required)
-            .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope))
-            .with_show_token_footer(cfg.channels.show_token_footer),
-    )
+    let memory_store = zunel_core::MemoryStore::new(workspace.clone());
+    Ok(agent_loop_for_counter
+        .with_tools_arc(shared_registry)
+        .with_workspace(workspace)
+        .with_skills(skills)
+        .with_memory_store(memory_store)
+        .with_approval_required(cfg.tools.approval_required)
+        .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope))
+        .with_show_token_footer(cfg.channels.show_token_footer))
 }
 
 fn parse_approval_scope(s: &str) -> ApprovalScope {

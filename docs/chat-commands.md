@@ -10,11 +10,7 @@ These commands work inside Slack conversations and local interactive agent sessi
 | `/status` | Show bot status |
 | `/reload` | Re-discover every configured MCP server without restarting the process. Use after restarting an MCP backend (or editing `~/.zunel/config.json`) so the agent picks up the freshly listed tools immediately. |
 | `/reload <server>` | Re-discover one MCP server by name (the same key under `tools.mcpServers` in `config.json`). Useful when only one backend went unhealthy. |
-| `/dream` | Run Dream memory consolidation now |
-| `/dream-log` | Show the latest Dream memory change |
-| `/dream-log <sha>` | Show a specific Dream memory change |
-| `/dream-restore` | List recent Dream memory versions |
-| `/dream-restore <sha>` | Restore memory to the state before a specific change |
+| `/dream` | Run Dream memory consolidation now. Reports the number of processed history entries and which durable-memory files were edited. In Slack, ask the agent in plain language ("consolidate memory now") and it calls the [`zunel_dream_run`](#zunel-dream-run) tool. |
 | `/help` | Show available in-chat commands |
 
 > **Slack note:** `/reload` and the other `/`-prefixed commands above are
@@ -24,6 +20,23 @@ These commands work inside Slack conversations and local interactive agent sessi
 > all MCP servers") and it calls the [`mcp_reconnect`](#mcp-reconnect)
 > tool against the same live registry. The end effect is identical — no
 > gateway restart needed.
+
+## `zunel_dream_run`
+
+The `zunel_dream_run` tool is registered automatically alongside `self`,
+`spawn`, and `mcp_reconnect` in the local agent (`zunel agent`), the Slack
+gateway (`zunel gateway`), and the library facade. It triggers an
+immediate Dream pass using the same `provider` / `model` / `MemoryStore`
+the agent loop uses; the results match `/dream` in the local REPL.
+
+**Arguments:** none.
+
+**Output:** JSON with `status` (`applied` / `analysed-no-edits` /
+`noop`), `processed_entries`, `edited_files`, `cursor_advanced_to`. A
+read-only counterpart, `zunel_dream_status` on the
+[`zunel-mcp-self`](self-tool.md) server, reads the last recorded
+outcome from `<workspace>/.zunel/scheduler.json` without running a new
+pass.
 
 ## `mcp_reconnect`
 

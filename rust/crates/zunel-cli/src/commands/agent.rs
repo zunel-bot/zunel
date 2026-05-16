@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use zunel_core::{
     build_default_registry, build_default_registry_async, mcp_reconnect::McpReconnectTool,
-    reconnect_unhealthy_mcp_servers, AgentLoop, ApprovalHandler, ApprovalScope, ReloadReport,
-    RuntimeSelfStateProvider, SessionManager, SharedToolRegistry, SubagentManager,
+    reconnect_unhealthy_mcp_servers, AgentLoop, ApprovalHandler, ApprovalScope, DreamRunTool,
+    MemoryStore, ReloadReport, RuntimeSelfStateProvider, SessionManager, SharedToolRegistry,
+    SubagentManager,
 };
 use zunel_skills::SkillsLoader;
 use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
@@ -40,24 +41,25 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
         .with_child_tools(child_tools),
     );
     registry.register(Arc::new(SpawnTool::new(subagents.clone())));
+    registry.register(Arc::new(DreamRunTool::new(
+        MemoryStore::new(workspace.clone()),
+        provider.clone(),
+        cfg.agents.defaults.model.clone(),
+        cfg.agents.defaults.dream.clone(),
+    )));
+    // Build the loop first so we can borrow its shared iteration
+    // counter for the self state provider before constructing it.
+    // The order matters: `self` registration needs the counter, the
+    // shared registry, and a stable tool-names snapshot.
+    let agent_loop_for_counter = AgentLoop::with_sessions(
+        provider.clone(),
+        cfg.agents.defaults.clone(),
+        sessions.clone(),
+    );
+    let iteration_counter = agent_loop_for_counter.iteration_counter();
     let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
     tool_names.push("self".into());
     tool_names.push("mcp_reconnect".into());
-    registry.register(Arc::new(SelfTool::from_provider(Arc::new(
-        RuntimeSelfStateProvider {
-            model: cfg.agents.defaults.model.clone(),
-            provider: cfg
-                .agents
-                .defaults
-                .provider
-                .clone()
-                .unwrap_or_else(|| "custom".into()),
-            workspace: workspace.display().to_string(),
-            max_iterations: 15,
-            tools: tool_names,
-            subagents,
-        },
-    ))));
     // Wrap the registry in a shared handle BEFORE registering
     // `mcp_reconnect`, because that tool needs to mutate the same
     // live registry the agent loop reads on every turn (so reload
@@ -67,6 +69,23 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
         let mut guard = shared_registry
             .write()
             .expect("zunel tool registry lock poisoned");
+        Arc::make_mut(&mut *guard).register(Arc::new(SelfTool::from_provider(Arc::new(
+            RuntimeSelfStateProvider {
+                model: cfg.agents.defaults.model.clone(),
+                provider: cfg
+                    .agents
+                    .defaults
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "custom".into()),
+                workspace: workspace.display().to_string(),
+                max_iterations: 15,
+                tools: tool_names,
+                subagents,
+                iteration_counter: Some(iteration_counter),
+                live_tools: Some(Arc::clone(&shared_registry)),
+            },
+        ))));
         Arc::make_mut(&mut *guard).register(Arc::new(McpReconnectTool::new(
             Arc::clone(&shared_registry),
             config_path.map(Path::to_path_buf),
@@ -76,13 +95,13 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
     // builtins (e.g. `mcp-oauth-login`). User skills win on name
     // collisions; embedded builtins fill in otherwise.
     let skills = SkillsLoader::new(&workspace, None, &[]);
-    let mut builder =
-        AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions.clone())
-            .with_tools_arc(shared_registry)
-            .with_workspace(workspace.clone())
-            .with_skills(skills)
-            .with_approval_required(cfg.tools.approval_required)
-            .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope));
+    let mut builder = agent_loop_for_counter
+        .with_tools_arc(shared_registry)
+        .with_workspace(workspace.clone())
+        .with_skills(skills)
+        .with_memory_store(zunel_core::MemoryStore::new(workspace.clone()))
+        .with_approval_required(cfg.tools.approval_required)
+        .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope));
     if cfg.tools.approval_required {
         let handler: Arc<dyn ApprovalHandler> = Arc::new(StdinApprovalHandler::new());
         builder = builder.with_approval(handler);

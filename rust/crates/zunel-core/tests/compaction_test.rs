@@ -59,12 +59,16 @@ async fn compact_session_collapses_stale_head() {
         summary: "user discussed feature X with assistant; open todo: write tests.".into(),
     });
     let svc = CompactionService::new(provider, "gpt-x".into());
-    let collapsed = svc
+    let outcome = svc
         .compact_session(&mut session, 8)
         .await
         .expect("compaction succeeded");
 
-    assert!(collapsed > 0, "should collapse stale head");
+    assert!(outcome.compacted_count > 0, "should collapse stale head");
+    assert!(
+        !outcome.summary_body.is_empty(),
+        "outcome should carry the summary body so Stage 1 can persist it",
+    );
     assert_eq!(
         session.messages().len(),
         9,
@@ -99,11 +103,12 @@ async fn compact_session_is_noop_when_under_threshold() {
         summary: "should never be called".into(),
     });
     let svc = CompactionService::new(provider, "gpt-x".into());
-    let collapsed = svc
+    let outcome = svc
         .compact_session(&mut session, 8)
         .await
         .expect("noop succeeded");
-    assert_eq!(collapsed, 0);
+    assert_eq!(outcome.compacted_count, 0);
+    assert!(outcome.summary_body.is_empty());
     assert_eq!(session.messages().len(), 5);
 }
 

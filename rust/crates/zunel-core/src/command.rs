@@ -28,6 +28,10 @@ pub enum CommandOutcome {
     /// CLI REPL because it owns the `Arc<AgentLoop>` the reload
     /// runs against.
     ReloadMcp { target: Option<String> },
+    /// Trigger an immediate Dream consolidation pass. Handled by the
+    /// CLI REPL because it owns the `Arc<AgentLoop>` with the
+    /// configured provider, model, and memory store.
+    RunDream,
 }
 
 type BoxedHandler = Box<
@@ -111,6 +115,7 @@ pub mod builtins {
             "/help — Show available commands",
             "/clear — Clear the current conversation",
             "/status — Show bot status",
+            "/dream — Run a Dream memory-consolidation pass now",
             "/reload [server] — Re-discover MCP servers (or one by name) without restart",
             "/restart — Restart the process",
             "/exit — Exit the REPL (alias: /quit)",
@@ -136,6 +141,9 @@ pub mod builtins {
         });
         router.register_exact("/quit", |_ctx: CommandContext| async {
             Ok::<_, crate::Error>(CommandOutcome::Exit)
+        });
+        router.register_exact("/dream", |_ctx: CommandContext| async {
+            Ok::<_, crate::Error>(CommandOutcome::RunDream)
         });
         // `/reload` (no arg) reloads every configured MCP server;
         // `/reload <name>` reloads one. Both shapes resolve to the

@@ -146,11 +146,11 @@ async fn compact_session(
         .await
         .with_context(|| "building provider")?;
     let svc = CompactionService::new(provider, model.clone());
-    let collapsed = svc
+    let outcome = svc
         .compact_session(&mut session, args.keep)
         .await
         .with_context(|| "running compaction")?;
-    if collapsed == 0 {
+    if outcome.compacted_count == 0 {
         println!(
             "nothing to compact: {} messages already at or under keep_tail={}",
             before_msgs, args.keep
@@ -160,6 +160,7 @@ async fn compact_session(
     manager.save(&session)?;
     let after_msgs = session.messages().len();
     let after_bytes = file_bytes(&manager.path_for(&args.key)).unwrap_or(0);
+    let collapsed = outcome.compacted_count;
     println!(
         "compacted {key}: {before_msgs} → {after_msgs} messages ({collapsed} collapsed), \
          {before_bytes} → {after_bytes} bytes, model={model}",

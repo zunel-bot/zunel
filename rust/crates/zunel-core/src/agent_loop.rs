@@ -17,6 +17,7 @@ use crate::compaction::CompactionService;
 use crate::default_tools::{reload_mcp_servers, ReloadReport};
 use crate::document::extract_documents;
 use crate::error::Result;
+use crate::memory::{DreamOutcome, DreamService, MemoryStore};
 use crate::runner::{AgentRunSpec, AgentRunner, TrimBudgets};
 use crate::session::{ChatRole, Session, SessionManager};
 use crate::trim::chat_message_to_value;
@@ -104,6 +105,19 @@ pub struct AgentLoop {
     /// Wired from `channels.showTokenFooter` so it follows the same
     /// per-deployment opt-in as everything else channel-related.
     show_token_footer: bool,
+    /// Optional Stage 1 wire-up. When set, every successful idle
+    /// compaction appends the produced summary to
+    /// `<workspace>/memory/history.jsonl` so the gateway's Dream
+    /// service has fresh input to consolidate into `MEMORY.md` /
+    /// `SOUL.md` / `USER.md`. Without this handle the compaction
+    /// summary lives only inside the session JSONL and Dream sees
+    /// nothing — see `docs/memory.md` Stage 1.
+    memory_store: Option<Arc<MemoryStore>>,
+    /// Shared iteration counter. The runner publishes its 1-indexed
+    /// iteration into this on every loop body; the `self` tool's
+    /// `RuntimeSelfStateProvider` reads from the same `Arc` so it
+    /// reports a live count instead of the historical hard-coded 0.
+    iteration_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AgentLoop {
@@ -145,6 +159,8 @@ impl AgentLoop {
             extra_system_message: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             show_token_footer: false,
+            memory_store: None,
+            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -167,6 +183,8 @@ impl AgentLoop {
             extra_system_message: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             show_token_footer: false,
+            memory_store: None,
+            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -255,6 +273,25 @@ impl AgentLoop {
         self
     }
 
+    /// Wire Stage 1: every successful idle compaction appends the
+    /// produced summary to `<workspace>/memory/history.jsonl` so the
+    /// gateway's Dream service has input to consolidate. Without this
+    /// the compaction summary lives only in the session JSONL and
+    /// Dream silently no-ops on every tick.
+    pub fn with_memory_store(mut self, store: MemoryStore) -> Self {
+        self.memory_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Clone the shared iteration counter so the CLI/gateway setup
+    /// can hand it to `RuntimeSelfStateProvider` — the same `Arc`
+    /// that the per-turn `AgentRunner` writes into. Without this
+    /// hookup, the `self` tool keeps reporting `iterations: 0/<max>`
+    /// even mid-turn (the historical bug).
+    pub fn iteration_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.iteration_counter.clone()
+    }
+
     /// Read-only snapshot of the live tool registry. Returns an
     /// `Arc<ToolRegistry>` so callers can keep the snapshot around
     /// without holding the lock; a concurrent reload publishes a new
@@ -296,6 +333,28 @@ impl AgentLoop {
         Arc::make_mut(&mut *guard).unregister(name).is_some()
     }
 
+    /// Run a Dream consolidation pass now using this loop's configured
+    /// provider, model, memory store, and `DreamConfig`. Returns
+    /// `Err` if no memory store is attached (Stage 1 not wired). The
+    /// `/dream` slash command and a future native `zunel_dream_run`
+    /// tool both call into this so they share a single canonical
+    /// execution path.
+    pub async fn run_dream(&self) -> Result<DreamOutcome> {
+        let store = self
+            .memory_store
+            .as_ref()
+            .ok_or_else(|| {
+                crate::error::Error::Other(
+                    "Dream is not wired: AgentLoop has no MemoryStore attached".into(),
+                )
+            })?
+            .as_ref()
+            .clone();
+        let svc = DreamService::new(store, self.provider.clone(), self.defaults.model.clone())
+            .with_config(&self.defaults.dream);
+        svc.run().await
+    }
+
     /// Reload MCP servers from disk and splice the freshly listed
     /// tools into the live registry. `target = None` reloads every
     /// configured server (matching boot-time `register_mcp_tools`
@@ -322,6 +381,50 @@ impl AgentLoop {
             max_tokens: self.defaults.max_tokens,
             reasoning_effort: self.defaults.reasoning_effort.clone(),
         }
+    }
+
+    /// Render the per-turn workspace memory system message. Returns
+    /// `None` when no `MemoryStore` is attached or all three files
+    /// (`MEMORY.md`, `SOUL.md`, `USER.md`) are missing/empty. Each
+    /// file is read live every turn (so Dream edits take effect
+    /// immediately) and capped at `MEMORY_FILE_CAP_BYTES` to keep
+    /// the per-turn token cost bounded as MEMORY.md grows. Read I/O
+    /// failures degrade silently to "skip this file" — a transient
+    /// disk error must never break the agent loop.
+    fn build_memory_system_message(&self) -> Option<ChatMessage> {
+        const MEMORY_FILE_CAP_BYTES: usize = 10 * 1024;
+        let store = self.memory_store.as_ref()?;
+        let mut sections: Vec<String> = Vec::new();
+        let pieces: [(&str, std::result::Result<String, _>); 3] = [
+            ("USER.md", store.read_user()),
+            ("SOUL.md", store.read_soul()),
+            ("MEMORY.md", store.read_memory()),
+        ];
+        for (label, result) in pieces {
+            let Ok(body) = result else { continue };
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let (slice, truncated) =
+                zunel_util::truncate_at_char_boundary(trimmed, MEMORY_FILE_CAP_BYTES);
+            let suffix = if truncated {
+                "\n\n…(truncated; see file on disk for full contents)"
+            } else {
+                ""
+            };
+            sections.push(format!("## {label}\n{slice}{suffix}"));
+        }
+        if sections.is_empty() {
+            return None;
+        }
+        let blob = sections.join("\n\n---\n\n");
+        Some(ChatMessage::system(format!(
+            "# Workspace Memory\n\n\
+             Durable cross-session notes. USER.md describes the user, SOUL.md is your persona, \
+             MEMORY.md is the long-term ledger Dream consolidates from your sessions.\n\n\
+             {blob}"
+        )))
     }
 
     /// Render the per-turn skills system message. Returns `None` when
@@ -446,17 +549,53 @@ impl AgentLoop {
                         .unwrap_or_else(|| self.defaults.model.clone());
                     let svc = CompactionService::new(self.provider.clone(), model);
                     match svc.compact_session(&mut session, keep_tail).await {
-                        Ok(compacted) => {
+                        Ok(outcome) => {
                             tracing::info!(
                                 session_key,
                                 idle_minutes,
                                 threshold_minutes = threshold,
-                                compacted,
+                                compacted = outcome.compacted_count,
                                 keep_tail,
                                 "agent_loop: idle-compacted session",
                             );
-                            if compacted > 0 {
+                            if outcome.compacted_count > 0 {
                                 sessions.save_async(&session).await?;
+                                // Stage 1: hand the compaction summary
+                                // to the memory store so Dream has
+                                // input next tick. Sync I/O off the
+                                // reactor; a failure is logged but
+                                // does not abort the turn.
+                                if let Some(store) = self.memory_store.clone() {
+                                    let body = outcome.summary_body.clone();
+                                    let key = session_key.to_string();
+                                    let join = tokio::task::spawn_blocking(move || {
+                                        store.append_history(&body)
+                                    })
+                                    .await;
+                                    match join {
+                                        Ok(Ok(cursor)) => {
+                                            tracing::debug!(
+                                                session_key = key,
+                                                cursor,
+                                                "agent_loop: appended compaction summary to memory history",
+                                            );
+                                        }
+                                        Ok(Err(err)) => {
+                                            tracing::warn!(
+                                                session_key = key,
+                                                error = %err,
+                                                "agent_loop: failed to append compaction summary to memory history",
+                                            );
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                session_key = key,
+                                                error = %err,
+                                                "agent_loop: memory append join error",
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(err) => {
@@ -475,13 +614,18 @@ impl AgentLoop {
         let history = session.get_history(self.history_window());
         let mut initial_messages = history_to_chat_messages(&history);
         // Stack the per-turn system messages: operator persona first
-        // (Mode 2's `system_prompt` arg), skills summary second,
-        // history third. Both are re-rendered from the live builder
+        // (Mode 2's `system_prompt` arg), then workspace memory
+        // (USER.md / SOUL.md / MEMORY.md so Dream's consolidated
+        // knowledge actually reaches the model), then skills summary,
+        // then history. All three are re-rendered from live sources
         // every turn, so the persisted session log never accumulates
         // ephemeral system messages.
         let mut prepended: Vec<ChatMessage> = Vec::new();
         if let Some(extra) = self.extra_system_message.as_deref() {
             prepended.push(ChatMessage::system(extra));
+        }
+        if let Some(memory) = self.build_memory_system_message() {
+            prepended.push(memory);
         }
         if let Some(skills) = self.build_skills_system_message() {
             prepended.push(skills);
@@ -519,7 +663,8 @@ impl AgentLoop {
             .read()
             .expect("zunel tool registry lock poisoned")
             .clone();
-        let runner = AgentRunner::new(self.provider.clone(), tools_snapshot, approval);
+        let runner = AgentRunner::new(self.provider.clone(), tools_snapshot, approval)
+            .with_iteration_counter(self.iteration_counter.clone());
         let result = runner
             .run(
                 AgentRunSpec {

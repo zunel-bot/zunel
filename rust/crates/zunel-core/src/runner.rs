@@ -137,6 +137,12 @@ pub struct AgentRunner {
     provider: Arc<dyn LLMProvider>,
     tools: Arc<ToolRegistry>,
     approval: Arc<dyn ApprovalHandler>,
+    /// Optional sink for the runner's current 1-indexed iteration
+    /// count. Updated at the start of every loop body and reset to 0
+    /// when the run unwinds. The `self` tool consumer reads this to
+    /// answer "how many iterations have we used so far this turn?"
+    /// instead of the previous hard-coded `0`.
+    iteration_counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl AgentRunner {
@@ -149,7 +155,19 @@ impl AgentRunner {
             provider,
             tools,
             approval,
+            iteration_counter: None,
         }
+    }
+
+    /// Attach a shared counter that the runner will update with the
+    /// current 1-indexed iteration number at the start of each loop
+    /// body and reset to 0 on exit. Used by `RuntimeSelfStateProvider`
+    /// so the `self` tool reports the live iteration instead of a
+    /// hard-coded zero. Optional — runners constructed without one
+    /// behave exactly as before.
+    pub fn with_iteration_counter(mut self, counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.iteration_counter = Some(counter);
+        self
     }
 
     pub async fn run(
@@ -183,6 +201,12 @@ impl AgentRunner {
         let mut total_usage = Usage::default();
 
         'outer: for iteration in 0..max_iter {
+            // Publish the 1-indexed iteration count so concurrent
+            // `self` tool calls see the live value rather than a
+            // hard-coded zero. Reset to 0 below when the run exits.
+            if let Some(counter) = self.iteration_counter.as_ref() {
+                counter.store(iteration + 1, std::sync::atomic::Ordering::Relaxed);
+            }
             // Cancel-check 1: before we even ask the provider for the
             // next iteration, bail out if the hub cancelled the call
             // since the previous iteration finished.
@@ -376,6 +400,13 @@ impl AgentRunner {
                 context.stop_reason = Some(format!("{stop:?}"));
                 hook.after_iteration(context).await;
             }
+        }
+
+        // Mark the runner idle so a follow-up `self` tool call (or a
+        // background observer) doesn't keep reporting the last
+        // iteration of a finished turn.
+        if let Some(counter) = self.iteration_counter.as_ref() {
+            counter.store(0, std::sync::atomic::Ordering::Relaxed);
         }
 
         Ok(AgentRunResult {

@@ -30,6 +30,21 @@ prose paragraph; no bullet lists, no headings, no preamble.";
 
 const SUMMARY_PREFIX: &str = "[Prior conversation summary]\n";
 
+/// Result of a successful `compact_session` call.
+///
+/// `compacted_count == 0` means nothing was collapsed (history was
+/// already at or under `keep_tail + 2`). When non-zero, `summary_body`
+/// holds the LLM-produced prose (without the `[Prior conversation
+/// summary]\n` prefix) — the same text that was just spliced into the
+/// session as a system row. Callers like the agent loop's Stage 1
+/// wire-up use this to feed `MemoryStore::append_history` so Dream
+/// has fresh input.
+#[derive(Debug, Clone, Default)]
+pub struct CompactionOutcome {
+    pub compacted_count: usize,
+    pub summary_body: String,
+}
+
 pub struct CompactionService {
     provider: Arc<dyn LLMProvider>,
     model: String,
@@ -94,20 +109,28 @@ impl CompactionService {
     /// row, then bump `last_consolidated` past it. Returns the number
     /// of source messages that were collapsed.
     ///
-    /// Returns `Ok(0)` when there is nothing to compact (history
-    /// shorter than `keep_tail + 2`), so callers can treat it as a
-    /// no-op without raising.
-    pub async fn compact_session(&self, session: &mut Session, keep_tail: usize) -> Result<usize> {
+    /// Returns a [`CompactionOutcome`] with `compacted_count == 0` when
+    /// there is nothing to compact (history shorter than `keep_tail +
+    /// 2`), so callers can treat it as a no-op without raising. On a
+    /// successful compaction, `summary_body` holds the LLM-produced
+    /// summary text (without the `[Prior conversation summary]\n`
+    /// prefix) so callers can persist it elsewhere (e.g. Stage 1's
+    /// `MemoryStore::append_history`).
+    pub async fn compact_session(
+        &self,
+        session: &mut Session,
+        keep_tail: usize,
+    ) -> Result<CompactionOutcome> {
         let total = session.messages().len();
         let consolidated = session.last_consolidated();
         // Need at least 2 stale messages to make a summary worthwhile.
         if total <= consolidated + keep_tail.saturating_add(2) {
-            return Ok(0);
+            return Ok(CompactionOutcome::default());
         }
         let stale_end = total.saturating_sub(keep_tail);
         let stale = session.messages()[consolidated..stale_end].to_vec();
         if stale.is_empty() {
-            return Ok(0);
+            return Ok(CompactionOutcome::default());
         }
         let stale_count = stale.len();
         let summary_body = self.summarize(&stale).await?;
@@ -117,7 +140,10 @@ impl CompactionService {
             "timestamp": naive_local_iso_now(),
         });
         session.replace_range_with_summary(consolidated, stale_end, summary);
-        Ok(stale_count)
+        Ok(CompactionOutcome {
+            compacted_count: stale_count,
+            summary_body,
+        })
     }
 }
 

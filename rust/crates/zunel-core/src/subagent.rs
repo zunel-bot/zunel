@@ -11,6 +11,7 @@ use zunel_tools::self_tool::{SelfState, SelfStateProvider, SubagentSummary};
 use zunel_tools::spawn::SpawnHandle;
 use zunel_tools::ToolRegistry;
 
+use crate::agent_loop::SharedToolRegistry;
 use crate::approval::{ApprovalDecision, ApprovalHandler, ApprovalRequest, ApprovalScope};
 use crate::runner::{AgentRunSpec, AgentRunner};
 
@@ -49,19 +50,46 @@ pub struct RuntimeSelfStateProvider {
     pub provider: String,
     pub workspace: String,
     pub max_iterations: u32,
+    /// Static fallback tool name list, used only when no live
+    /// registry is wired. Production setup attaches
+    /// `live_tools` so the `self` tool reports the actual,
+    /// post-`mcp_reconnect` set of registered tools rather than
+    /// a frozen boot-time snapshot.
     pub tools: Vec<String>,
     pub subagents: Arc<SubagentManager>,
+    /// Live counter the `AgentRunner` updates each iteration. When
+    /// set, the `self` tool reports the actual iteration count.
+    /// Defaults to `None` so legacy callers see the previous "always
+    /// zero" behaviour.
+    pub iteration_counter: Option<Arc<AtomicUsize>>,
+    /// Live tool-registry handle. When set, `state()` builds the
+    /// `tools` field from the registry's current names instead of
+    /// the static `tools` Vec, so MCP-driven adds/removes are visible
+    /// to the agent immediately.
+    pub live_tools: Option<SharedToolRegistry>,
 }
 
 impl SelfStateProvider for RuntimeSelfStateProvider {
     fn state(&self) -> SelfState {
+        let tools = match self.live_tools.as_ref() {
+            Some(handle) => match handle.read() {
+                Ok(guard) => guard.names().map(str::to_string).collect(),
+                Err(_poisoned) => self.tools.clone(),
+            },
+            None => self.tools.clone(),
+        };
+        let current_iteration = self
+            .iteration_counter
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed) as u32)
+            .unwrap_or(0);
         SelfState {
             model: self.model.clone(),
             provider: self.provider.clone(),
             workspace: self.workspace.clone(),
             max_iterations: self.max_iterations,
-            current_iteration: 0,
-            tools: self.tools.clone(),
+            current_iteration,
+            tools,
             subagents: self
                 .subagents
                 .statuses()

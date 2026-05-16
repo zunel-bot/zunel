@@ -201,6 +201,11 @@ fn tools_list() -> Value {
                     "required": ["server", "callback_url"]
                 }
             },
+            {
+                "name": "zunel_dream_status",
+                "description": "Report the most recent Dream consolidation pass: when it ran, how many history entries it processed, which files it edited, and whether the cursor advanced. Useful for answering 'did Dream run last night?' or debugging why MEMORY.md isn't updating.",
+                "inputSchema": {"type": "object", "properties": {}}
+            },
             zunel_mcp_slack::capability_tool_descriptor()
         ]
     })
@@ -249,6 +254,7 @@ async fn call_tool(msg: &Value) -> Value {
         "zunel_slack_capability" | "slack_capability" => {
             wrap(Ok(zunel_mcp_slack::capability_report()))
         }
+        "zunel_dream_status" | "dream_status" => wrap(dream_status()),
         "mcp_login_start" => {
             let args = call_args(msg);
             wrap(mcp_login_start(&args).await)
@@ -362,6 +368,39 @@ fn channels_list() -> Result<String> {
     Ok(serde_json::to_string(&json!({
         "count": channels.len(),
         "channels": channels
+    }))?)
+}
+
+/// Read `<workspace>/.zunel/scheduler.json` and surface the last
+/// recorded Dream pass. Returns a structured payload (not just a
+/// human-readable string) so the agent can reason over it. If the
+/// gateway has never run, returns `{ "ever_ran": false }` rather than
+/// an error — the caller will typically interpret that as "Dream
+/// isn't configured or the gateway has never been started".
+fn dream_status() -> Result<String> {
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
+    let path = workspace.join(".zunel").join("scheduler.json");
+    if !path.exists() {
+        return Ok(serde_json::to_string(&json!({
+            "ever_ran": false,
+            "interval_h": cfg.agents.defaults.dream.interval_h,
+            "note": "no scheduler.json yet — gateway hasn't run, or Dream interval is unset"
+        }))?);
+    }
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let state: Value = serde_json::from_str(&raw).context("parsing scheduler.json")?;
+    let last_at = state.get("last_dream_at").cloned().unwrap_or(Value::Null);
+    let last_outcome = state
+        .get("last_dream_outcome")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(serde_json::to_string(&json!({
+        "ever_ran": !last_at.is_null(),
+        "interval_h": cfg.agents.defaults.dream.interval_h,
+        "last_dream_at": last_at,
+        "last_outcome": last_outcome
     }))?)
 }
 

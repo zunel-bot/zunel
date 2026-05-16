@@ -215,6 +215,30 @@ async fn handle_command(
             }
             Ok(LineFlow::Continue)
         }
+        Some(CommandOutcome::RunDream) => {
+            match agent_loop.run_dream().await {
+                Ok(outcome) if outcome.processed_entries == 0 => {
+                    println!("Dream: no new history entries to consolidate.");
+                }
+                Ok(outcome) => {
+                    let cursor = outcome
+                        .cursor_advanced_to
+                        .map(|c| format!("cursor → {c}"))
+                        .unwrap_or_else(|| "cursor not advanced (no edits applied)".into());
+                    let edits = if outcome.edited_files.is_empty() {
+                        "no files edited".to_string()
+                    } else {
+                        format!("edits: {}", outcome.edited_files.join(", "))
+                    };
+                    println!(
+                        "Dream: processed {} entries; {}; {}.",
+                        outcome.processed_entries, edits, cursor
+                    );
+                }
+                Err(err) => println!("Dream failed: {err}"),
+            }
+            Ok(LineFlow::Continue)
+        }
         None => {
             println!("Unknown command: {line}. Try /help.");
             Ok(LineFlow::Continue)
