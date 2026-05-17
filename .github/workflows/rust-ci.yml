@@ -50,6 +50,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      # Seed the default config + workspace so tests that exercise
+      # the production `~/.zunel/config.json` path (e.g. the MCP
+      # self-server pipeline-plumbing tests in `zunel-mcp-self`
+      # and `zunel-cli`) don't trip the bare-runner condition that
+      # caused four targets to fail across rounds 4–7. Tests that
+      # want isolation continue to set their own `ZUNEL_HOME` via
+      # `tempfile::tempdir` + `BTreeMap` env — those are unaffected
+      # because `ZUNEL_HOME` wins over `$HOME`.
+      - name: Seed minimal ~/.zunel/config.json fixture
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p "$HOME/.zunel/workspace"
+          cat > "$HOME/.zunel/config.json" <<JSON
+          {
+            "providers": {},
+            "agents": {
+              "defaults": {
+                "model": "ci-fixture-model",
+                "workspace": "$HOME/.zunel/workspace"
+              }
+            }
+          }
+          JSON
       - run: cargo test --workspace --no-fail-fast
 
   deny:
