@@ -510,8 +510,24 @@ fn channels_list() -> Result<String> {
 /// last_heartbeat_at, mcp_servers, channels, sessions_dir_exists }`.
 /// Cheaper than calling four separate self tools just to figure out
 /// "is this thing healthy".
+///
+/// Robust to a missing or unparseable `~/.zunel/config.json` (CI
+/// runners, first launch before `zunel onboard`): falls back to a
+/// minimal `{server, version, config_loaded: false, error}` payload
+/// rather than surfacing an error, so the agent can still get a
+/// liveness signal.
 fn self_status() -> Result<String> {
-    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let cfg = match zunel_config::load_config(None) {
+        Ok(c) => c,
+        Err(err) => {
+            return Ok(serde_json::to_string(&json!({
+                "server": SERVER_NAME,
+                "version": env!("CARGO_PKG_VERSION"),
+                "config_loaded": false,
+                "error": err.to_string()
+            }))?);
+        }
+    };
     let workspace = zunel_config::workspace_path(&cfg.agents.defaults).context("workspace")?;
     let scheduler_path = workspace.join(".zunel").join("scheduler.json");
     let (last_dream_at, last_heartbeat_at) = if scheduler_path.exists() {
@@ -535,6 +551,7 @@ fn self_status() -> Result<String> {
     Ok(serde_json::to_string(&json!({
         "server": SERVER_NAME,
         "version": env!("CARGO_PKG_VERSION"),
+        "config_loaded": true,
         "model": cfg.agents.defaults.model,
         "provider": cfg.agents.defaults.provider,
         "workspace": workspace.display().to_string(),

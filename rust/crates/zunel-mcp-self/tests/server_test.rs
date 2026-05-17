@@ -25,9 +25,53 @@ async fn native_self_mcp_server_lists_and_calls_status_tool() {
     // well-known top-level keys so the test remains resilient to
     // additions but catches accidental shape regressions.
     let parsed: serde_json::Value = serde_json::from_str(&result).expect(&result);
+    // Liveness keys: always present regardless of whether
+    // `~/.zunel/config.json` exists on the test runner. The
+    // `model` / `workspace` keys only land when config loads
+    // successfully — see `native_self_mcp_server_self_status_with_config`
+    // below for the full-shape assertion.
     assert_eq!(parsed["server"], "zunel-mcp-self", "{result}");
     assert!(parsed.get("version").is_some(), "{result}");
-    assert!(parsed.get("model").is_some(), "{result}");
+}
+
+/// Same tool, but with a real config + workspace in scope. Pins
+/// the full shape — model, workspace, last_dream_at — that the
+/// agent typically relies on for "are you healthy?" answers.
+#[tokio::test]
+async fn native_self_mcp_server_self_status_with_config() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        home.path().join("config.json"),
+        format!(
+            r#"{{
+                "providers": {{}},
+                "agents": {{"defaults": {{"model": "test-m", "workspace": "{}"}}}}
+            }}"#,
+            workspace.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let bin = cargo_bin("zunel-mcp-self");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "ZUNEL_HOME".to_string(),
+        home.path().to_string_lossy().to_string(),
+    );
+    let mut client = StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &[], env, &[], 5)
+        .await
+        .unwrap();
+
+    let result = client
+        .call_tool("self_status", serde_json::json!({}), 5)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect(&result);
+    assert_eq!(parsed["server"], "zunel-mcp-self", "{result}");
+    assert_eq!(parsed["config_loaded"], true, "{result}");
+    assert_eq!(parsed["model"], "test-m", "{result}");
     assert!(parsed.get("workspace").is_some(), "{result}");
 }
 

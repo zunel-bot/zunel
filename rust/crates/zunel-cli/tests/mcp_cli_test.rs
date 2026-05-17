@@ -37,9 +37,13 @@ async fn cli_mcp_serve_self_exposes_self_status_tool() {
     // keys so the test catches accidental shape regressions without
     // pinning the full body.
     let parsed: serde_json::Value = serde_json::from_str(&result).expect(&result);
+    // Liveness keys: must always be present. The `workspace` key
+    // only lands when `~/.zunel/config.json` loads cleanly; on CI
+    // runners without an onboarded config the payload reports
+    // `config_loaded: false` instead. Either is acceptable here —
+    // this test is about pipeline plumbing, not config fidelity.
     assert_eq!(parsed["server"], "zunel-mcp-self", "{result}");
     assert!(parsed.get("version").is_some(), "{result}");
-    assert!(parsed.get("workspace").is_some(), "{result}");
 }
 
 #[tokio::test]
